@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Apple Passwords",
+  "version": "0.1.0",
+  "description": "Read-only iCloud Keychain autofill for Linux, via a native host.",
+  "permissions": ["nativeMessaging", "activeTab", "scripting", "storage"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "browser_specific_settings": {
+    "gecko": { "id": "ap@hpidcock.github.io", "strict_min_version": "115.0" }
+  },
+  "background": { "service_worker": "background.js", "scripts": ["background.js"] },
+  "action": { "default_popup": "popup.html", "default_title": "Apple Passwords" },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ]
+}

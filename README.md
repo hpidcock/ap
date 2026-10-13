@@ -1,0 +1,193 @@
+# ap - iCloud Keychain for Linux, in Go
+
+**Unofficial** client for iCloud Keychain. Sign in with your Apple ID and `ap` registers this
+computer as one of your Apple devices, joins your keychain, and downloads your passwords into
+a private, encrypted vault on your machine. A browser extension fills them in for you, like the
+Passwords app on a Mac or iPhone. Your Hide My Email addresses show up too. `ap` only ever
+*reads*: nothing in your Apple account is changed.
+
+This project is a Go rewrite of two upstream projects, combined into one binary:
+
+- [Sank6/iCloud-Keychain-for-Linux](https://github.com/Sank6/iCloud-Keychain-for-Linux) (`icp`,
+  Python) - the GrandSlam sign-in, Octagon trust join, CloudKit transport, keychain decryption,
+  native-messaging host, and the browser extension (kept as-is under `extension/`).
+- [Dadoum/anisette-v3-server](https://github.com/Dadoum/anisette-v3-server) (D) and the
+  [Dadoum/Provision](https://github.com/Dadoum/Provision) library it is built on - the code that
+  produces the machine data Apple's sign-in requires. Only that part is ported, built straight
+  into `ap login` and `ap sync`, so no anisette server or Docker container is needed.
+
+Like the upstream project this is a reverse-engineering effort, **not affiliated with Apple**,
+and it is untested with Advanced Data Protection enabled.
+
+## How it fits together
+
+```
+ap login / ap sync ──► gsa.apple.com, setup.icloud.com, gateway.icloud.com (CloudKit)
+        │
+        │ every request carries X-Apple-I-MD* machine data, generated in-process by
+        └─► Apple's CoreADI (libCoreADI.so, loaded by a small ELF loader)
+
+~/.config/ap/vault.enc  ◄──  ap-host (native-messaging)  ◄──  browser extension
+```
+
+On first use `ap` downloads `libCoreADI.so` / `libstoreservicescore.so` from Apple's public
+Apple Music for Android package into `~/.config/ap/anisette/lib`, loads them with a small
+in-process ELF loader (`internal/anisette/local/androidlib`), provisions a machine identity
+with Apple once, and from then on generates the anisette headers itself whenever it talks to
+Apple. No server runs in the background.
+
+## Install
+
+### Nix flake
+
+```
+nix run github:hpidcock/ap -- --help
+nix profile install github:hpidcock/ap
+```
+
+### Home Manager
+
+The flake exports a Home Manager module that installs the CLI, refreshes the vault on a timer,
+and registers the browser extension's native messaging host:
+
+```nix
+{
+  inputs.ap.url = "github:hpidcock/ap";
+
+  # in your home-manager configuration:
+  imports = [ inputs.ap.homeManagerModules.default ];
+
+  services.ap = {
+    enable = true;
+    sync.interval = "6h";            # systemd user timer running `ap sync`
+    browsers = {
+      firefox = true;                # ~/.mozilla/native-messaging-hosts
+      chromium = true;               # needs the extension id below
+      chromeExtensionId = "abcdefghijklmnopabcdefghijklmnop";
+    };
+  };
+}
+```
+
+The extension folder to load unpacked is `${pkgs.ap}/share/ap/extension`. The sync timer only
+fires once a session exists (after `ap login`).
+
+### From source
+
+```
+go build ./cmd/ap ./cmd/ap-host
+```
+
+cgo and a C compiler are required for the embedded anisette server.
+
+## Sign in
+
+```
+ap login
+```
+
+The first run downloads Apple's ADI libraries (about 140 MB) and provisions this machine with
+Apple; after that, sign-in walks you through the login: your Apple ID, password, and the 2FA code Apple sends to your
+other devices. `ap` then asks for a **device passcode or iCloud Security Code** so it can join
+your keychain.
+
+- You're only asked for your password and 2FA code **once**; the device stays trusted.
+- The passcode step is **important and can't be undone**: entering the wrong passcode too many
+  times (about 10) permanently locks your keychain recovery. One correct entry is perfectly safe.
+  `ap` shows which device each escrow record belongs to and asks for an explicit confirmation
+  before spending an attempt.
+- Your 2FA code and passcode are used immediately and **never saved**. Your password and tokens
+  are kept encrypted on your computer (master key in the login keyring via Secret Service, or a
+  0600 key file if no keyring is available) so `ap` can stay signed in. Pass
+  `--no-save-password` to skip storing the password.
+
+## Browse your passwords
+
+```
+ap show              # full-screen browser: type to filter, Enter reveals, Esc clears/quits
+ap show github       # plain-text search
+ap show --plain -s   # plain text with passwords revealed
+```
+
+Verification codes set up in the Passwords app are shown next to the login with a live countdown.
+
+## Browser extension
+
+The `extension/` folder (also installed to `share/ap/extension`) works in Chromium-based
+browsers and Firefox.
+
+**Chrome, Chromium, Brave, Helium:** open the extensions page, enable Developer mode, *Load
+unpacked* the extension folder, copy the extension id, then run
+
+```
+ap install-host <EXTENSION_ID>
+```
+
+**Firefox:** load `extension/manifest.json` as a temporary add-on from
+`about:debugging#/runtime/this-firefox`, then run `ap install-host`.
+
+`ap install-host` writes the native-messaging manifests pointing at `ap-host`; with Home Manager
+the module writes them for you. On a sign-in page, click the username or password box: an
+**iCloud Passwords** dropdown appears with matching logins. Two-factor code boxes get the current
+code instead.
+
+## Keeping your passwords up to date
+
+Your passwords are a snapshot. `ap-host` kicks off a background `ap sync` when the vault is
+older than 6 hours (`AP_SYNC_MAX_AGE` seconds, 0 to disable) and the Home Manager timer does the
+same. To refresh right now:
+
+```
+ap sync
+```
+
+## All commands
+
+```
+login         sign in, join your iCloud Keychain, and download your passwords
+show          browse and search your passwords and Hide My Email addresses
+sync          refresh your passwords now
+logout        sign out (use --wipe-device to also forget this device)
+install-host  register the browser extension's native-messaging host
+```
+
+Environment: `XDG_CONFIG_HOME` (state lives in `$XDG_CONFIG_HOME/ap`), `AP_NO_KEYRING=1` (always use the
+key file), `AP_INSECURE_TLS=1` (disable TLS verification, debugging only).
+
+## Differences from the upstream projects
+
+- One Go binary, no Python environment and no Docker: the anisette machine data is generated
+  in-process instead of by a separate server.
+- TLS is verified. The upstream Python client disabled certificate checks; `ap` instead embeds
+  Apple's root CA (which gsa.apple.com chains to) alongside the system roots.
+- The native host is `ap-host`; the extension's host name is `io.github.hpidcock.ap`.
+- The vault, session and alias cache keep the upstream on-disk formats (libsodium secret box,
+  JSON inside), but live under `~/.config/ap`.
+
+See `RESEARCH.md` in the upstream repository for the protocol notes this port follows.
+
+## Development
+
+```
+go test ./...                                   # offline unit tests
+AP_ANISETTE_LIBDIR=~/.config/ap/anisette/lib \
+  go test -tags live ./internal/anisette/local  # live provisioning test against Apple
+nix build                                       # flake package
+```
+
+## Credits and licenses
+
+The GrandSlam sign-in flow follows [JJTech's reference](https://gist.github.com/JJTech0130/049716196f5f1751b8944d93e73d3452).
+The keychain decryption, Octagon trust join and CloudKit transport follow
+[OpenBubbles/rustpush](https://github.com/OpenBubbles/rustpush), cross-checked against
+[Apple's open-source Security code](https://github.com/apple-oss-distributions/Security). Hide My
+Email is ported from [dedoussis's browser extension](https://github.com/dedoussis/icloud-hide-my-email-browser-extension).
+All of this was first assembled by [Sank6/iCloud-Keychain-for-Linux](https://github.com/Sank6/iCloud-Keychain-for-Linux),
+whose MIT license is reproduced in [LICENSE.md](LICENSE.md) and covers this project.
+
+The machine-data generator under `internal/anisette/local` is a port of the ADI side of
+[Dadoum/anisette-v3-server](https://github.com/Dadoum/anisette-v3-server) and of the loader /
+ADI wrapper from [Dadoum/Provision](https://github.com/Dadoum/Provision), which is licensed under
+the GNU Library General Public License v2 (see `internal/anisette/local/COPYING-LGPLv2`); that
+subtree is available under those terms as well. Apple's CoreADI libraries are downloaded at
+runtime from Apple and are not redistributed here.

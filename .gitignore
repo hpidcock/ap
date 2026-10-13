@@ -1,0 +1,7 @@
+.direnv/
+result
+result-*
+# never commit local secrets/config
+*.enc
+master.key
+*.apk
