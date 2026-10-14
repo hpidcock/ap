@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -185,5 +187,30 @@ func ExtractWebservices(settings map[string]any) map[string]string {
 			out[short] = u
 		}
 	}
+	// An Android client is not offered the KeychainSync dataclass, so the escrowproxy URL
+	// is missing. Its host is fixed apart from the account's iCloud partition, which every
+	// other service URL carries (https://p57-ckdatabasews.icloud.com:443 -> p57).
+	if out["keychainsync"] == "" {
+		if p := partition(out); p != "" {
+			out["keychainsync"] = "https://" + p + "-escrowproxy.icloud.com:443"
+		}
+	}
 	return out
+}
+
+var partitionRE = regexp.MustCompile(`^https://(p[0-9]+)-[a-z0-9]+\.icloud\.com`)
+
+// partition returns the pNN iCloud partition shared by the service URLs, or "".
+func partition(ws map[string]string) string {
+	names := make([]string, 0, len(ws))
+	for name := range ws {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if m := partitionRE.FindStringSubmatch(ws[name]); m != nil {
+			return m[1]
+		}
+	}
+	return ""
 }

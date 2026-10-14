@@ -2,6 +2,22 @@ package icloud
 
 import "testing"
 
+func TestExtractWebservicesDerivesEscrowFromPartition(t *testing.T) {
+	ws := ExtractWebservices(map[string]any{
+		"webservices": map[string]any{
+			"ckdatabasews": map[string]any{"url": "https://p57-ckdatabasews.icloud.com:443", "status": "active"},
+			"push":         map[string]any{"url": "https://p57-pushws.icloud.com:443"},
+		},
+	})
+	if ws["keychainsync"] != "https://p57-escrowproxy.icloud.com:443" {
+		t.Fatalf("keychainsync = %q", ws["keychainsync"])
+	}
+	if ws := ExtractWebservices(map[string]any{"webservices": map[string]any{
+		"x": map[string]any{"url": "https://setup.icloud.com"}}}); ws["keychainsync"] != "" {
+		t.Fatalf("unexpected derivation %q", ws["keychainsync"])
+	}
+}
+
 func TestExtractWebservices(t *testing.T) {
 	settings := map[string]any{
 		"webservices": map[string]any{

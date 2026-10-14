@@ -125,6 +125,15 @@ func mintPET(dev *device.Device, anis anisette.Provider, username, password stri
 	return pet, err
 }
 
+func keysOf(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func describeBottle(b octagon.Bottle) string {
 	cm := plistx.Dict(b.Meta["ClientMetadata"])
 	var name string
@@ -181,6 +190,14 @@ func refreshWebservices(s *session.Session, dev *device.Device, anis anisette.Pr
 		return 0, &icloud.Error{Msg: fmt.Sprintf("iCloud rejected the token: %s", plistx.Str(data["status-message"]))}
 	}
 	ws := icloud.ExtractWebservices(data)
+	if os.Getenv("AP_DEBUG") != "" {
+		names := make([]string, 0, len(ws))
+		for k := range ws {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		ui.Step("account settings: dataclasses %v, services %v", keysOf(plistx.Dict(data["com.apple.mobileme"])), names)
+	}
 	if len(ws) == 0 {
 		return 0, nil
 	}
