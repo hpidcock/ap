@@ -16,6 +16,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"sort"
 	"time"
 
 	"github.com/hpidcock/ap/internal/anisette"
@@ -57,9 +59,19 @@ type Client struct {
 	LastSessionKey       []byte
 }
 
-// NewClient returns a GSA client.
+// NewClient returns a GSA client. Setting AP_DEBUG logs every GSA status block to stderr.
 func NewClient(dev *device.Device, anis anisette.Provider) *Client {
-	return &Client{Device: dev, Anisette: anis, HTTP: httpx.Client(10 * time.Second)}
+	c := &Client{Device: dev, Anisette: anis, HTTP: httpx.Client(10 * time.Second)}
+	if os.Getenv("AP_DEBUG") != "" {
+		c.Debug = log.New(os.Stderr, "gsa: ", 0)
+	}
+	return c
+}
+
+func (c *Client) debugf(format string, a ...any) {
+	if c.Debug != nil {
+		c.Debug.Printf(format, a...)
+	}
 }
 
 func (c *Client) cpd() (map[string]any, error) {
@@ -123,6 +135,7 @@ func (c *Client) request(params map[string]any) (map[string]any, error) {
 	if response == nil || resp.StatusCode/100 != 2 {
 		return nil, errorf("GSA %s failed: HTTP %d: %s", op, resp.StatusCode, Status(response))
 	}
+	c.debugf("%s: HTTP %d %s", op, resp.StatusCode, Status(response))
 	return response, nil
 }
 
@@ -132,7 +145,7 @@ func Status(r map[string]any) string {
 	if s == nil {
 		s = r
 	}
-	return fmt.Sprintf("ec=%v em=%q au=%q", s["ec"], plistx.Str(s["em"]), plistx.Str(s["au"]))
+	return fmt.Sprintf("ec=%v em=%q au=%q hsc=%v", s["ec"], plistx.Str(s["em"]), plistx.Str(s["au"]), s["hsc"])
 }
 
 // EncryptPassword is Apple's pre-SRP password KDF: SHA256 -> (hex for s2k_fo) -> PBKDF2-SHA256.
@@ -197,7 +210,17 @@ func (c *Client) Authenticate(username, password, stage string) (map[string]any,
 	if err != nil {
 		return nil, nil, errorf("could not parse spd: %v", err)
 	}
+	c.debugf("%s: spd keys %v tokens %v", stage, keys(spd), keys(plistx.Dict(spd["t"])))
 	return complete, spd, nil
+}
+
+func keys(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func decryptCBC(sessionKey, data []byte) ([]byte, error) {
@@ -334,8 +357,13 @@ func AuthenticateWith2FA(c *Client, username, password string, twofa TwoFactorFu
 	if err != nil {
 		return nil, err
 	}
-	au := plistx.Str(plistx.Dict(r["Status"])["au"])
-	if au == "trustedDeviceSecondaryAuth" || au == "secondaryAuth" {
+	status := plistx.Dict(r["Status"])
+	au := plistx.Str(status["au"])
+	// Since Apple's October 2026 change the complete response may carry no "au" at all
+	// and instead hsc=409: a code has already been pushed to the trusted devices, and the
+	// spd holds no PET until that code is validated.
+	codeAlreadySent := au == "" && plistx.Int(status["hsc"]) == 409
+	if au == "trustedDeviceSecondaryAuth" || au == "secondaryAuth" || codeAlreadySent {
 		dsid := plistx.Str(spd["adsid"])
 		if dsid == "" {
 			dsid = plistx.Str(spd["DsPrsId"])
@@ -347,9 +375,11 @@ func AuthenticateWith2FA(c *Client, username, password string, twofa TwoFactorFu
 		if dsid == "" || idms == "" {
 			return nil, errorf("2FA required but missing dsid/GsIdMS in spd")
 		}
-		if au == "trustedDeviceSecondaryAuth" {
-			if err := c.TriggerTrustedFactor(dsid, idms); err != nil {
-				return nil, err
+		if au != "secondaryAuth" {
+			if !codeAlreadySent {
+				if err := c.TriggerTrustedFactor(dsid, idms); err != nil {
+					return nil, err
+				}
 			}
 			code, err := twofa("trusted")
 			if err != nil {
@@ -375,8 +405,9 @@ func AuthenticateWith2FA(c *Client, username, password string, twofa TwoFactorFu
 		if err != nil {
 			return nil, err
 		}
-		if plistx.Str(plistx.Dict(r["Status"])["au"]) != "" {
-			return nil, errorf("still being asked for 2FA after submitting a code")
+		status = plistx.Dict(r["Status"])
+		if plistx.Str(status["au"]) != "" || plistx.Int(status["hsc"]) == 409 {
+			return nil, errorf("still being asked for 2FA after submitting a code (%s)", Status(r))
 		}
 	}
 	return spd, nil
@@ -392,7 +423,7 @@ func ExtractPET(spd map[string]any) (string, string, int64, error) {
 	entry := plistx.Dict(tokens["com.apple.gs.idms.pet"])
 	pet := plistx.Str(entry["token"])
 	if dsid == "" || pet == "" {
-		return "", "", 0, errorf("no PET in spd")
+		return "", "", 0, errorf("no PET in spd (tokens present: %v; run with AP_DEBUG=1 for the GSA status)", keys(tokens))
 	}
 	return dsid, pet, plistx.Int(entry["expiry"]), nil
 }
