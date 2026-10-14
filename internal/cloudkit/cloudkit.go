@@ -27,7 +27,7 @@ const (
 	CKCodeInvokeURL     = "https://gateway.icloud.com/ckcoderouter/api/client/code/invoke"
 	CKDatabaseSyncURL   = "https://gateway.icloud.com/ckdatabase/api/client/record/sync"
 	CKAppInitURL        = "https://gateway.icloud.com/setup/setup/ck/v1/ckAppInit"
-	CKMmeClientInfo     = "<MacBookPro18,3> <Mac OS X;13.4.1;22F8> <com.apple.cloudkit.CloudKitDaemon/1970 (com.apple.cloudd/1970)>"
+	CKMmeClientInfo     = device.Description + " <com.apple.cloudkit.CloudKitDaemon/1970 (com.apple.cloudd/1970)>"
 	CuttlefishContainer = "com.apple.security.keychain"
 	CuttlefishBundle    = "com.apple.security.cuttlefish" // CKCode (Cuttlefish) requests
 	SecuritydBundle     = "com.apple.securityd"           // CKKS record fetches

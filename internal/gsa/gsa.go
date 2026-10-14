@@ -27,15 +27,12 @@ import (
 	"github.com/hpidcock/ap/internal/srp"
 )
 
-// Static identity strings sent with every GSA request. Since 2026-10-12 Apple rejects
-// sign-ins (ec=-80045 "This action cannot be completed at this time.") whose client info
-// claims macOS while the anisette data comes from the Android CoreADI library, so the
-// client info now describes an Android device, matching what iloader/isideload and the
-// SideStore workaround send. The other services (setup.icloud.com, escrowproxy, CloudKit)
-// keep their Mac-like strings.
+// Static identity strings sent with every GSA request; the device part comes from
+// device.Description (see there for why it is Android). These match what iloader /
+// isideload send since Apple's 2026-10-12 change.
 const (
 	UserAgent  = "akd/1.0 CFNetwork/808.1.4"
-	ClientInfo = "<Pixel 7> <Android;14;UQ1A.240205.002> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
+	ClientInfo = device.Description + " <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
 	Endpoint   = "https://gsa.apple.com/grandslam/GsService2"
 )
 

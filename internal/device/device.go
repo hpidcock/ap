@@ -18,6 +18,12 @@ import (
 	"github.com/hpidcock/ap/internal/paths"
 )
 
+// Description is the hardware/OS part of every X-Mme-Client-Info ap sends. Since
+// 2026-10-12 Apple rejects requests whose client info claims macOS while the anisette
+// machine data comes from the Android CoreADI library (GSA: ec=-80045, setup.icloud.com:
+// status 1), so ap describes itself as the Android device the library really is.
+const Description = "<Pixel 7> <Android;14;UQ1A.240205.002>"
+
 // Device is the local identity.
 type Device struct {
 	DeviceID      string `json:"device_id"`

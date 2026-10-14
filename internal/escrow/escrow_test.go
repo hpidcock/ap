@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/hex"
+	"github.com/hpidcock/ap/internal/device"
 	"math/big"
 	"testing"
 
@@ -100,7 +101,7 @@ func TestHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	if h["Content-Type"] != "application/x-apple-plst" || h["User-Agent"] != "com.apple.sbd/638.100.48 com.apple.iCloudHelper/282" ||
-		h["X-Mme-Client-Info"] != "<MacBookPro18,3> <macOS;13.4.1;22F8> <com.apple.AuthKit/1 (com.apple.sbd/638.100.48)>" {
+		h["X-Mme-Client-Info"] != device.Description+" <com.apple.AuthKit/1 (com.apple.sbd/638.100.48)>" {
 		t.Fatalf("%v", h)
 	}
 }

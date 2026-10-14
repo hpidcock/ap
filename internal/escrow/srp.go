@@ -228,7 +228,7 @@ var CommandVariant = map[string]string{
 
 const (
 	escrowUserAgent     = "com.apple.sbd/638.100.48 com.apple.iCloudHelper/282"
-	escrowMmeClientInfo = "<MacBookPro18,3> <macOS;13.4.1;22F8> <com.apple.AuthKit/1 (com.apple.sbd/638.100.48)>"
+	escrowMmeClientInfo = device.Description + " <com.apple.AuthKit/1 (com.apple.sbd/638.100.48)>"
 )
 
 // NewRecovery returns a Recovery for the KeychainSync escrow proxy host.

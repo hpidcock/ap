@@ -24,7 +24,7 @@ const (
 
 	// AOSKit/accountsd identity for the iCloud setup endpoints (distinct from the GSA akd UA).
 	UserAgent  = "com.apple.iCloudHelper/282 CFNetwork/1408.0.4 Darwin/22.5.0"
-	ClientInfo = "<MacBookPro18,3> <Mac OS X;13.4.1;22F8> <com.apple.AOSKit/282 (com.apple.accountsd/113)>"
+	ClientInfo = device.Description + " <com.apple.AOSKit/282 (com.apple.accountsd/113)>"
 )
 
 // Error is an iCloud setup failure.
