@@ -47,6 +47,8 @@ type Client struct {
 	LastInitResponse     map[string]any
 	LastCompleteResponse map[string]any
 	LastSessionKey       []byte
+
+	clockSkew time.Duration // local minus Apple's clock, from the first response
 }
 
 // NewClient returns a GSA client. Every request uses its own connection: see
@@ -115,6 +117,7 @@ func (c *Client) request(params map[string]any) (map[string]any, error) {
 		return nil, errorf("GSA %s failed: HTTP %d: %s", op, resp.StatusCode, Status(response))
 	}
 	debugf("%s: HTTP %d %s keys=%v", op, resp.StatusCode, Status(response), logx.Keys(response))
+	c.checkClock(resp)
 	return response, nil
 }
 
@@ -182,19 +185,27 @@ func (c *Client) Authenticate(username, password, stage string) (map[string]any,
 	}
 	// hsc 434: Apple wants the anisette machine data re-synchronised with the data it
 	// hands back before it will look at the account. Providers that can do that (the
-	// remote server does) get one retry.
-	if sim := resyncData(initResp); sim != "" {
+	// remote server does) get two tries; a persistent 434 usually means the local clock
+	// is wrong, since the one-time password is time-based.
+	for try := 0; try < 2; try++ {
+		sim := resyncData(initResp)
+		if sim == "" {
+			break
+		}
 		rs, ok := c.Anisette.(anisette.Resyncer)
 		if !ok {
 			return nil, nil, errorf("%s: Apple asked for an anisette resync (hsc 434), which this anisette provider cannot do", stage)
 		}
-		debugf("%s: anisette resync requested (hsc 434), syncing then retrying init", stage)
+		debugf("%s: anisette resync requested (hsc 434, try %d), syncing then retrying init", stage, try+1)
 		if _, err := rs.Resync(sim); err != nil {
 			return nil, nil, err
 		}
 		if initResp, err = c.request(initParams); err != nil {
 			return nil, nil, err
 		}
+	}
+	if resyncData(initResp) != "" {
+		return nil, nil, errorf("%s: Apple keeps asking for an anisette resync (hsc 434) after two resyncs%s", stage, c.clockHint())
 	}
 	c.LastInitResponse = initResp
 	if !plistx.Has(initResp["sp"]) {
@@ -240,6 +251,33 @@ func (c *Client) Authenticate(username, password, stage string) (map[string]any,
 	}
 	debugf("%s: spd keys %v tokens %v", stage, logx.Keys(spd), logx.Keys(plistx.Dict(spd["t"])))
 	return complete, spd, nil
+}
+
+// checkClock compares Apple's Date header with the local clock. The anisette one-time
+// password is time-based, so a skewed clock shows up as endless hsc 434 resyncs.
+func (c *Client) checkClock(resp *http.Response) {
+	if c.clockSkew != 0 {
+		return
+	}
+	serverTime, err := http.ParseTime(resp.Header.Get("Date"))
+	if err != nil {
+		return
+	}
+	skew := time.Since(serverTime).Round(time.Second)
+	if skew == 0 {
+		skew = time.Nanosecond
+	}
+	c.clockSkew = skew
+	if skew > 90*time.Second || skew < -90*time.Second {
+		debugf("local clock is %s off Apple's (Date: %s)", skew, resp.Header.Get("Date"))
+	}
+}
+
+func (c *Client) clockHint() string {
+	if c.clockSkew > 90*time.Second || c.clockSkew < -90*time.Second {
+		return fmt.Sprintf(" - this machine's clock is %s off Apple's, which breaks the time-based machine data; fix the clock", c.clockSkew)
+	}
+	return ""
 }
 
 // resyncData returns the base64 X-Apple-I-MD-DATA of a response whose Status demands

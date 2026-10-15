@@ -271,11 +271,13 @@ var errNotProvisioned = errors.New("server rejected the provisioning blob (-4506
 // before answering.
 func (r *Remote) getHeadersLocked(sim string) (otp, mid, rinfo string, err error) {
 	var resp struct {
-		Result  string `json:"result"`
-		Message string `json:"message"`
-		OTP     string `json:"X-Apple-I-MD"`
-		MID     string `json:"X-Apple-I-MD-M"`
-		RINFO   string `json:"X-Apple-I-MD-RINFO"`
+		Result  string         `json:"result"`
+		Message string         `json:"message"`
+		OTP     string         `json:"X-Apple-I-MD"`
+		MID     string         `json:"X-Apple-I-MD-M"`
+		RINFO   string         `json:"X-Apple-I-MD-RINFO"`
+		ADIPB   string         `json:"adi_pb"` // some servers hand back the blob ADI rewrote during a resync
+		Extra   map[string]any `json:"-"`
 	}
 	body := map[string]string{
 		"identifier": base64.StdEncoding.EncodeToString(r.state.Identifier),
@@ -286,9 +288,12 @@ func (r *Remote) getHeadersLocked(sim string) (otp, mid, rinfo string, err error
 		body["device_id"] = r.state.DeviceID()
 		body["md_lu"] = r.state.LocalUserUUID()
 	}
-	if err := r.getJSON("/v3/get_headers", body, &resp); err != nil {
+	if err := r.getJSON("/v3/get_headers", body, &resp.Extra); err != nil {
 		return "", "", "", r.serverError("get_headers", err)
 	}
+	raw, _ := json.Marshal(resp.Extra)
+	_ = json.Unmarshal(raw, &resp)
+	logx.Debugf("anisette", "get_headers(sim=%v): result=%s keys=%v", sim != "", resp.Result, logx.Keys(resp.Extra))
 	switch resp.Result {
 	case "Headers":
 		if resp.OTP == "" || resp.MID == "" {
@@ -296,6 +301,13 @@ func (r *Remote) getHeadersLocked(sim string) (otp, mid, rinfo string, err error
 		}
 		if resp.RINFO == "" {
 			resp.RINFO = "17106176"
+		}
+		if blob, err := base64.StdEncoding.DecodeString(resp.ADIPB); err == nil && len(blob) > 0 && !bytes.Equal(blob, r.state.ADIPB) {
+			r.state.ADIPB = blob
+			if err := r.saveStateLocked(); err != nil {
+				return "", "", "", err
+			}
+			logx.Debugf("anisette", "server returned an updated adi_pb (%d bytes); stored", len(blob))
 		}
 		return resp.OTP, resp.MID, resp.RINFO, nil
 	case "GetHeadersError":
