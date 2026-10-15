@@ -154,6 +154,26 @@ install-host  register the browser extension's native-messaging host
 Environment: `XDG_CONFIG_HOME` (state lives in `$XDG_CONFIG_HOME/ap`), `AP_NO_KEYRING=1` (always use the
 key file), `AP_INSECURE_TLS=1` (disable TLS verification, debugging only).
 
+## Troubleshooting
+
+When something fails, re-run with `--debug` (anywhere on the command line, or `AP_DEBUG=1`) and `ap`
+prints every step and every exchange with Apple to stderr: the GrandSlam status codes, which
+delegates and service URLs `setup.icloud.com` returned, each CloudKit and escrowproxy call with its
+result code, and how many keychain records were fetched, unwrapped and decrypted, including why any
+were skipped. `--trace` (`AP_DEBUG=2`) adds request and response bodies. `--log-file PATH`
+(`AP_LOG_FILE`) appends the full trace to a private file whether or not `--debug` is set, which is
+the way to capture the background sync or the native-messaging host (`ap-host` reads the same
+variables; set them in the Home Manager module or the host's environment).
+
+Everything that could authenticate as you is redacted before it is written: Basic auth, tokens,
+cookies, 2FA codes, anisette machine data, and passwords, proofs and PETs inside bodies. The log
+still names your Apple ID, device IDs and the devices in your escrow bottles, so treat it as private.
+
+Apple error codes `ap` has run into: `-80045` "This action cannot be completed at this time" means
+the client info and the anisette machine data disagree about the device (see `device.Description`),
+`hsc=409` means a 2FA code is already on its way to your trusted devices, and HTTP 503 from
+`gsa.apple.com` is throttling after several sign-ins in a row; `ap` retries that with backoff.
+
 ## Differences from the upstream projects
 
 - One Go binary, no Python environment and no Docker: the anisette machine data is generated

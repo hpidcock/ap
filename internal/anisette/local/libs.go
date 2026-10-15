@@ -4,9 +4,9 @@ import (
 	"archive/zip"
 	"errors"
 	"fmt"
+	"github.com/hpidcock/ap/internal/httpx"
 	"io"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -61,7 +61,7 @@ func EnsureLibraries(dir string, logf func(string, ...any)) error {
 	}
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
-	client := &http.Client{Timeout: 15 * time.Minute}
+	client := httpx.Client(15 * time.Minute)
 	resp, err := client.Get(APKURL)
 	if err != nil {
 		return fmt.Errorf("anisette: download: %w", err)

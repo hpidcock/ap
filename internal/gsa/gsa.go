@@ -14,15 +14,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
-	"os"
-	"sort"
 	"time"
 
 	"github.com/hpidcock/ap/internal/anisette"
 	"github.com/hpidcock/ap/internal/device"
 	"github.com/hpidcock/ap/internal/httpx"
+	"github.com/hpidcock/ap/internal/logx"
 	"github.com/hpidcock/ap/internal/plistx"
 	"github.com/hpidcock/ap/internal/srp"
 )
@@ -48,7 +46,6 @@ type Client struct {
 	Device   *device.Device
 	Anisette anisette.Provider
 	HTTP     *http.Client
-	Debug    *log.Logger
 
 	// Stashed for diagnostics (set by Authenticate).
 	LastInitResponse     map[string]any
@@ -56,20 +53,12 @@ type Client struct {
 	LastSessionKey       []byte
 }
 
-// NewClient returns a GSA client. Setting AP_DEBUG logs every GSA status block to stderr.
+// NewClient returns a GSA client.
 func NewClient(dev *device.Device, anis anisette.Provider) *Client {
-	c := &Client{Device: dev, Anisette: anis, HTTP: httpx.Client(10 * time.Second)}
-	if os.Getenv("AP_DEBUG") != "" {
-		c.Debug = log.New(os.Stderr, "gsa: ", 0)
-	}
-	return c
+	return &Client{Device: dev, Anisette: anis, HTTP: httpx.Client(10 * time.Second)}
 }
 
-func (c *Client) debugf(format string, a ...any) {
-	if c.Debug != nil {
-		c.Debug.Printf(format, a...)
-	}
-}
+func debugf(format string, a ...any) { logx.Debugf("gsa", format, a...) }
 
 func (c *Client) cpd() (map[string]any, error) {
 	cpd := map[string]any{
@@ -115,14 +104,9 @@ func (c *Client) request(params map[string]any) (map[string]any, error) {
 	httpReq.Header.Set("Accept", "*/*")
 	httpReq.Header.Set("User-Agent", UserAgent)
 	httpReq.Header.Set("X-MMe-Client-Info", ClientInfo)
-	resp, err := c.HTTP.Do(httpReq)
+	resp, raw, err := c.doWithRetry(httpReq, data, op)
 	if err != nil {
-		return nil, errorf("GSA %s failed: %v", op, err)
-	}
-	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, errorf("GSA %s failed: %v", op, err)
+		return nil, err
 	}
 	payload, perr := plistx.Decode(raw)
 	var response map[string]any
@@ -132,8 +116,40 @@ func (c *Client) request(params map[string]any) (map[string]any, error) {
 	if response == nil || resp.StatusCode/100 != 2 {
 		return nil, errorf("GSA %s failed: HTTP %d: %s", op, resp.StatusCode, Status(response))
 	}
-	c.debugf("%s: HTTP %d %s", op, resp.StatusCode, Status(response))
+	debugf("%s: HTTP %d %s keys=%v", op, resp.StatusCode, Status(response), logx.Keys(response))
 	return response, nil
+}
+
+// throttleBackoff is the wait before each retry of a throttled (429/503) GSA request,
+// overridden by a Retry-After header when Apple sends one.
+var throttleBackoff = []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second}
+
+// doWithRetry sends a GSA request, retrying on 429/503. gsa.apple.com throttles after a
+// burst of sign-ins (each login is at least two round trips), and one burst is normal
+// during `ap login`.
+func (c *Client) doWithRetry(req *http.Request, body []byte, op string) (*http.Response, []byte, error) {
+	for attempt := 0; ; attempt++ {
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			return nil, nil, errorf("GSA %s failed: %v", op, err)
+		}
+		raw, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, nil, errorf("GSA %s failed: %v", op, err)
+		}
+		throttled := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable
+		if !throttled || attempt >= len(throttleBackoff) {
+			return resp, raw, nil
+		}
+		wait := throttleBackoff[attempt]
+		if ra, err := time.ParseDuration(resp.Header.Get("Retry-After") + "s"); err == nil && ra > 0 && ra < 2*time.Minute {
+			wait = ra
+		}
+		debugf("%s: HTTP %d (throttled), retrying in %s", op, resp.StatusCode, wait)
+		time.Sleep(wait)
+	}
 }
 
 // Status formats the Status block of a GSA response for error messages.
@@ -177,6 +193,7 @@ func (c *Client) Authenticate(username, password, stage string) (map[string]any,
 	salt := plistx.Bytes(initResp["s"])
 	bPub := plistx.Bytes(initResp["B"])
 	iterations := int(plistx.Int(initResp["i"]))
+	debugf("%s: init ok protocol=%s iterations=%d salt=%d bytes B=%d bytes", stage, protocol, iterations, len(salt), len(bPub))
 	p, err := EncryptPassword(password, salt, iterations, protocol)
 	if err != nil {
 		return nil, nil, err
@@ -207,17 +224,8 @@ func (c *Client) Authenticate(username, password, stage string) (map[string]any,
 	if err != nil {
 		return nil, nil, errorf("could not parse spd: %v", err)
 	}
-	c.debugf("%s: spd keys %v tokens %v", stage, keys(spd), keys(plistx.Dict(spd["t"])))
+	debugf("%s: spd keys %v tokens %v", stage, logx.Keys(spd), logx.Keys(plistx.Dict(spd["t"])))
 	return complete, spd, nil
-}
-
-func keys(m map[string]any) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
 
 func decryptCBC(sessionKey, data []byte) ([]byte, error) {
@@ -285,8 +293,15 @@ func (c *Client) TriggerTrustedFactor(dsid, idmsToken string) error {
 	if err != nil {
 		return err
 	}
-	_, _, err = c.do(http.MethodGet, "https://gsa.apple.com/auth/verify/trusteddevice", h, nil)
-	return err
+	resp, raw, err := c.do(http.MethodGet, "https://gsa.apple.com/auth/verify/trusteddevice", h, nil)
+	if err != nil {
+		return errorf("could not ask Apple to push a 2FA code: %v", err)
+	}
+	debugf("trusteddevice push: HTTP %d (%d bytes)", resp.StatusCode, len(raw))
+	if resp.StatusCode/100 != 2 {
+		return errorf("Apple refused to push a 2FA code (HTTP %d)", resp.StatusCode)
+	}
+	return nil
 }
 
 // SubmitTrustedFactor validates a trusted-device code.
@@ -311,8 +326,15 @@ func (c *Client) TriggerSMSFactor(dsid, idmsToken string, phoneID int) error {
 	}
 	h.Set("Content-Type", "application/json")
 	body, _ := json.Marshal(map[string]any{"phoneNumber": map[string]any{"id": phoneID}, "mode": "sms"})
-	_, _, err = c.do(http.MethodPut, "https://gsa.apple.com/auth/verify/phone/", h, body)
-	return err
+	resp, raw, err := c.do(http.MethodPut, "https://gsa.apple.com/auth/verify/phone/", h, body)
+	if err != nil {
+		return errorf("could not ask Apple to send an SMS code: %v", err)
+	}
+	debugf("sms push (phone %d): HTTP %d (%d bytes)", phoneID, resp.StatusCode, len(raw))
+	if resp.StatusCode/100 != 2 {
+		return errorf("Apple refused to send an SMS code (HTTP %d)", resp.StatusCode)
+	}
+	return nil
 }
 
 // SubmitSMSFactor validates an SMS code.
@@ -335,6 +357,7 @@ func (c *Client) SubmitSMSFactor(code, dsid, idmsToken string, phoneID int) erro
 // A rejected code comes back as HTTP 200 with a bare plist carrying ec/em.
 func checkCode(resp *http.Response, raw []byte, kind string) error {
 	body, _ := plistx.Decode(raw)
+	debugf("%s code validation: HTTP %d %s", kind, resp.StatusCode, Status(body))
 	if plistx.Int(body["ec"]) != 0 || resp.StatusCode/100 != 2 {
 		reason := plistx.Str(body["em"])
 		if reason == "" {
@@ -360,6 +383,7 @@ func AuthenticateWith2FA(c *Client, username, password string, twofa TwoFactorFu
 	// and instead hsc=409: a code has already been pushed to the trusted devices, and the
 	// spd holds no PET until that code is validated.
 	codeAlreadySent := au == "" && plistx.Int(status["hsc"]) == 409
+	debugf("sign-in: au=%q hsc=%v codeAlreadySent=%v", au, status["hsc"], codeAlreadySent)
 	if au == "trustedDeviceSecondaryAuth" || au == "secondaryAuth" || codeAlreadySent {
 		dsid := plistx.Str(spd["adsid"])
 		if dsid == "" {
@@ -420,7 +444,8 @@ func ExtractPET(spd map[string]any) (string, string, int64, error) {
 	entry := plistx.Dict(tokens["com.apple.gs.idms.pet"])
 	pet := plistx.Str(entry["token"])
 	if dsid == "" || pet == "" {
-		return "", "", 0, errorf("no PET in spd (tokens present: %v; run with AP_DEBUG=1 for the GSA status)", keys(tokens))
+		return "", "", 0, errorf("no PET in spd (tokens present: %v; run with --debug for the GSA status)", logx.Keys(tokens))
 	}
+	debugf("PET for dsid %s expires %s", dsid, time.UnixMilli(plistx.Int(entry["expiry"])).Format(time.RFC3339))
 	return dsid, pet, plistx.Int(entry["expiry"]), nil
 }

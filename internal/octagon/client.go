@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/hpidcock/ap/internal/logx"
 	"time"
 
 	"github.com/hpidcock/ap/internal/anisette"
@@ -190,12 +191,14 @@ func NewClient(s *session.Session, dev *device.Device, anis anisette.Provider) (
 			return nil, errorf("no mmeAuthToken in session - run `ap login`")
 		}
 		var err error
+		logx.Debugf("octagon", "no cached cloudKitUserId; calling ckAppInit")
 		userID, err = cloudkit.CKAppInit(cloudkit.CuttlefishContainer, cloudkit.CuttlefishBundle, mmeDSID, mme.MmeAuthToken, anis)
 		if err != nil {
 			return nil, err
 		}
 		mme.CloudKitUserID = userID // persisted by the caller's next session.Save
 	}
+	logx.Debugf("octagon", "client ready: cloudKitUserId=%s peer=%v joined=%v", userID, s.Octagon != nil && s.Octagon.PeerID != "", s.IsJoined())
 	cfg := cloudkit.DeviceConfig{DeviceUUID: dev.DeviceID, Serial: serialOf(dev), Name: "Mac"}
 	return &Client{
 		Session: s, Device: dev, Anisette: anis, AdSID: s.DSID, UserID: userID,
@@ -209,7 +212,9 @@ func (c *Client) FetchChanges(syncToken string) (proto.FetchChangesResponse, err
 	if err != nil {
 		return proto.FetchChangesResponse{}, err
 	}
-	return proto.ParseFetchChangesResponse(res.SerializedResult()), nil
+	changes := proto.ParseFetchChangesResponse(res.SerializedResult())
+	logx.Debugf("octagon", "fetchChanges: %d bytes, syncToken=%v", len(res.SerializedResult()), changes.SyncToken != "")
+	return changes, nil
 }
 
 // FetchViableBottles lists the account's escrow bottles (non-destructive).
@@ -218,7 +223,9 @@ func (c *Client) FetchViableBottles() ([]proto.ViableBottle, error) {
 	if err != nil {
 		return nil, err
 	}
-	return proto.ParseViableBottles(res.SerializedResult()), nil
+	bottles := proto.ParseViableBottles(res.SerializedResult())
+	logx.Debugf("octagon", "fetchViableBottles: %d bottle(s)", len(bottles))
+	return bottles, nil
 }
 
 // ListRecoverableBottles correlates the viable bottles with escrowproxy GETRECORDS
@@ -231,10 +238,12 @@ func (c *Client) ListRecoverableBottles(escrowHost, email, pet string, warn func
 	meta := map[string]map[string]any{}
 	recovery := escrow.NewRecovery(escrowHost, email, pet, c.Anisette)
 	if records, err := recovery.ListRecords(); err != nil {
+		logx.Errorf("escrow", err, "GETRECORDS failed")
 		if warn != nil {
 			warn(fmt.Sprintf("GETRECORDS device metadata unavailable: %v", err))
 		}
 	} else {
+		logx.Debugf("escrow", "GETRECORDS: %d record(s)", len(records))
 		for _, r := range records {
 			meta[r.Label] = r.Meta
 		}
@@ -263,12 +272,16 @@ func (c *Client) SyncKeychain(zones []string) map[string][]cloudkit.Record {
 	for _, zone := range zones {
 		zid := cloudkit.RecordZoneIdentifier(zone, c.UserID)
 		var continuation []byte
+		pages, fetched := 0, 0
 		for {
 			raw, err := c.Transport.FetchRecords(cloudkit.BuildRetrieveChangesRequest(zid, continuation, 500))
 			if err != nil {
+				logx.Errorf("ckks", err, "zone %s: fetch failed after %d page(s); skipping the rest of the zone", zone, pages)
 				break
 			}
 			page := cloudkit.ParseRetrieveChangesResponse(raw)
+			pages++
+			fetched += len(page.Records)
 			for _, r := range page.Records {
 				grouped[r.Type] = append(grouped[r.Type], r)
 			}
@@ -277,6 +290,10 @@ func (c *Client) SyncKeychain(zones []string) map[string][]cloudkit.Record {
 				break
 			}
 		}
+		logx.Debugf("ckks", "zone %s: %d record(s) over %d page(s)", zone, fetched, pages)
+	}
+	for typ, recs := range grouped {
+		logx.Debugf("ckks", "record type %s: %d", typ, len(recs))
 	}
 	return grouped
 }
@@ -298,18 +315,21 @@ func (c *Client) recoverSponsor(escrowHost, email, pet string, passcode []byte, 
 		return nil, errorf("no viable escrow bottle found for this account")
 	}
 	recovery := escrow.NewRecovery(escrowHost, email, pet, c.Anisette)
+	logx.Debugf("join", "recovering bottle %s via %s (confirm=%v)", chosen.ID, escrowHost, confirm)
 	entropy, err := recovery.TryRecoverEscrow(chosen.ID, passcode, confirm)
 	if err != nil {
+		logx.Errorf("join", err, "escrow recovery of bottle %s failed", chosen.ID)
 		return nil, err
 	}
 	bottle, err := escrow.ParseOTBottle(chosen.OTBottle)
 	if err != nil {
-		return nil, err
+		return nil, errorf("bottle %s is not a parseable OTBottle: %v", chosen.ID, err)
 	}
 	identity, err := escrow.RecoverIdentity(bottle, entropy, c.AdSID)
 	if err != nil {
-		return nil, err
+		return nil, errorf("could not rebuild the sponsor identity from bottle %s: %v", chosen.ID, err)
 	}
+	logx.Debugf("join", "recovered sponsor peer %s", identity.PeerID)
 	c.Session.Octagon.Sponsor = &session.Sponsor{
 		PeerID:             identity.PeerID,
 		EncryptionPrivX963: hex.EncodeToString(identity.Encryption.PrivateX963()),
@@ -335,6 +355,7 @@ func (c *Client) JoinViaEscrow(escrowHost, email, pet string, passcode []byte, c
 		return "", err
 	}
 	included, stableClock, dynClock := TrustFromChanges(changes, identity.PeerID)
+	logx.Debugf("join", "trust page: %d included peer(s), stableClock=%d dynClock=%d", len(included), stableClock, dynClock)
 	if len(included) == 0 { // sponsor not in the page - trust at least it + self
 		included = []string{identity.PeerID}
 	}
@@ -348,9 +369,11 @@ func (c *Client) JoinViaEscrow(escrowHost, email, pet string, passcode []byte, c
 	}
 	req := proto.EncodeJoinWithVoucherRequest(peer, nil, nil, changes.SyncToken)
 	if _, err := c.Transport.Invoke("joinWithVoucher", req); err != nil {
+		logx.Errorf("join", err, "joinWithVoucher rejected")
 		return "", err
 	}
 	o.Joined = true
+	logx.Debugf("join", "joined: our peer %s vouched by %s", o.PeerID, identity.PeerID)
 	return identity.PeerID, nil
 }
 
@@ -360,6 +383,7 @@ func (c *Client) fetchRecoverableFor(peerID string, key *PeerKey) (map[string][]
 		return nil, nil, err
 	}
 	parsed := proto.ParseRecoverableTLKSharesResponse(res.SerializedResult())
+	logx.Debugf("octagon", "fetchRecoverableTLKShares(%s): %d share(s), %d synckey(s)", peerID, len(parsed.ShareRecords), len(parsed.SyncKeyRecords))
 	var shares, synckeys []cloudkit.Record
 	for _, r := range parsed.ShareRecords {
 		shares = append(shares, cloudkit.ParseRecord(r))
@@ -415,6 +439,7 @@ func (c *Client) SyncAndDecrypt() (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	logx.Debugf("sync", "%d TLK(s) recoverable, %d view synckey(s)", len(tlks), len(viewSynckeys))
 	records := c.SyncKeychain(nil)
 	records["synckey"] = append(records["synckey"], viewSynckeys...)
 	keys, err := LoadPeerKeys(c.Session.Octagon)
@@ -427,7 +452,8 @@ func (c *Client) SyncAndDecrypt() (int, error) {
 	}
 	store := keychain.BuildCredentialStore(records, c.Session.Octagon.PeerID, enc, tlks)
 	if err := vault.SaveVault(store); err != nil {
-		return 0, err
+		return 0, errorf("could not write the vault: %v", err)
 	}
+	logx.Debugf("sync", "vault saved with %d credential(s)", store.Len())
 	return store.Len(), nil
 }

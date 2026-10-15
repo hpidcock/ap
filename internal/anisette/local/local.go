@@ -3,6 +3,7 @@ package local
 import (
 	"encoding/base64"
 	"fmt"
+	"github.com/hpidcock/ap/internal/logx"
 	"os"
 	"path/filepath"
 	"sync"
@@ -85,6 +86,7 @@ func (l *Local) initLocked() error {
 		if created {
 			l.Logf("created a new anisette machine identity")
 		}
+		logx.Debugf("anisette", "libs=%s machine uuid=%s client-info=%q", l.libDir, m.UUID, m.ClientInfo)
 		a, err := adi.New(l.libDir)
 		if err != nil {
 			return err
@@ -106,11 +108,12 @@ func (l *Local) initLocked() error {
 func (l *Local) ensureProvisionedLocked() error {
 	ok, err := l.adi.IsMachineProvisioned(DSID)
 	if err != nil {
-		return err
+		return fmt.Errorf("ADIGetLoginCode/IsMachineProvisioned: %w", err)
 	}
 	if ok {
 		return nil
 	}
+	logx.Debugf("anisette", "machine not provisioned yet")
 	return l.withLock(func() error {
 		// Another process may have provisioned while we waited for the lock.
 		if ok, err := l.adi.IsMachineProvisioned(DSID); err != nil || ok {
@@ -118,7 +121,8 @@ func (l *Local) ensureProvisionedLocked() error {
 		}
 		l.Logf("provisioning this machine with Apple (once)...")
 		if err := NewProvisioningSession(l.adi, l.machine).Provision(DSID); err != nil {
-			return err
+			logx.Errorf("anisette", err, "provisioning failed")
+			return fmt.Errorf("anisette provisioning: %w", err)
 		}
 		l.Logf("provisioning done")
 		return nil
@@ -147,8 +151,9 @@ func (l *Local) AllHeaders() (map[string]string, error) {
 	}
 	otp, mid, err := l.adi.RequestOTP(DSID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ADIOTPRequest: %w", err)
 	}
+	logx.Tracef("anisette", "machine data generated: otp %d bytes, mid %d bytes", len(otp), len(mid))
 	now := time.Now()
 	zone, _ := now.Zone()
 	return map[string]string{

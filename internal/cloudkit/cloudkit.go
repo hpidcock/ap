@@ -20,6 +20,7 @@ import (
 	"github.com/hpidcock/ap/internal/anisette"
 	"github.com/hpidcock/ap/internal/device"
 	"github.com/hpidcock/ap/internal/httpx"
+	"github.com/hpidcock/ap/internal/logx"
 	"github.com/hpidcock/ap/internal/proto"
 )
 
@@ -218,6 +219,7 @@ func CKAppInit(container, bundle, dsid, mmeToken string, anis anisette.Provider)
 	if err := json.Unmarshal(raw, &out); err != nil || out.CloudKitUserID == "" {
 		return "", &Error{Msg: fmt.Sprintf("ckAppInit returned HTTP %d without a cloudKitUserId", resp.StatusCode), HTTPStatus: resp.StatusCode}
 	}
+	logx.Debugf("cloudkit", "ckAppInit(%s): HTTP %d, cloudKitUserId %s", container, resp.StatusCode, out.CloudKitUserID)
 	return out.CloudKitUserID, nil
 }
 
@@ -322,6 +324,7 @@ func (t *Transport) perform(url string, opType uint64, requestField int, request
 	if err != nil {
 		return nil, &Error{Msg: fmt.Sprintf("bad gzip body from %s: %v", url, err), HTTPStatus: resp.StatusCode}
 	}
+	logx.Debugf("cloudkit", "%s %s: HTTP %d, %d bytes (request %d bytes)", bundle, firstNonEmpty(routingHint, url), resp.StatusCode, len(raw), body.Len())
 	messages, err := Undelimit(raw)
 	if err != nil || len(messages) == 0 {
 		return nil, &Error{Msg: fmt.Sprintf("CloudKit returned HTTP %d with no parseable response", resp.StatusCode), HTTPStatus: resp.StatusCode}
@@ -335,10 +338,19 @@ func (t *Transport) perform(url string, opType uint64, requestField int, request
 		if desc == "" {
 			desc = "unknown"
 		}
-		return nil, &Error{Msg: "CloudKit operation failed: " + desc, Code: result.Code,
+		logx.Debugf("cloudkit", "%s failed: code=%d description=%q", firstNonEmpty(routingHint, url), result.Code, result.ErrorDescription)
+		return nil, &Error{Msg: fmt.Sprintf("CloudKit operation %s failed (code %d): %s", firstNonEmpty(routingHint, url), result.Code, desc), Code: result.Code,
 			Description: result.ErrorDescription, HTTPStatus: resp.StatusCode}
 	}
+	logx.Debugf("cloudkit", "%s ok: code=%d", firstNonEmpty(routingHint, url), result.Code)
 	return result, nil
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 // Invoke performs a CKCode function invoke (Cuttlefish RPC).

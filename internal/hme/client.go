@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/hpidcock/ap/internal/httpx"
+	"github.com/hpidcock/ap/internal/logx"
 	"io"
 	"net/http"
 	"os"
@@ -81,7 +83,7 @@ func (c *Client) List() ([]Alias, error) {
 	req.Header.Set("Referer", "https://www.icloud.com/")
 	client := c.HTTP
 	if client == nil {
-		client = &http.Client{Timeout: 20 * time.Second}
+		client = httpx.Client(20 * time.Second)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -98,6 +100,7 @@ func (c *Client) List() ([]Alias, error) {
 		return nil, &Error{Msg: fmt.Sprintf("hme/list failed (HTTP %d): %s", resp.StatusCode, errorDetail(data))}
 	}
 	result, _ := data["result"].(map[string]any)
+	logx.Debugf("hme", "hme/list: HTTP %d, result keys=%v", resp.StatusCode, logx.Keys(result))
 	entries, _ := result["hmeEmails"].([]any)
 	var out []Alias
 	for _, e := range entries {

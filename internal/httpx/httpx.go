@@ -44,15 +44,16 @@ func Insecure() bool {
 	return os.Getenv("AP_INSECURE_TLS") == "1"
 }
 
-// Transport returns a fresh transport honouring Insecure.
-func Transport() *http.Transport {
+// Transport returns a fresh transport honouring Insecure, wrapped so that every
+// exchange is logged through logx when debugging is on.
+func Transport() http.RoundTripper {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.Proxy = http.ProxyFromEnvironment
 	t.TLSClientConfig = &tls.Config{RootCAs: RootPool(), MinVersion: tls.VersionTLS12}
 	if Insecure() {
 		t.TLSClientConfig.InsecureSkipVerify = true //nolint:gosec // opt-in debugging aid
 	}
-	return t
+	return &loggingTransport{next: t}
 }
 
 // Client returns a client with the given timeout.

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/hpidcock/ap/internal/logx"
 	"github.com/hpidcock/ap/internal/paths"
 	"github.com/hpidcock/ap/internal/securestore"
 )
@@ -119,7 +120,29 @@ func Save(s *Session) error {
 	if err != nil {
 		return err
 	}
-	return securestore.WriteFile(paths.SessionFile(), data)
+	if err := securestore.WriteFile(paths.SessionFile(), data); err != nil {
+		logx.Errorf("session", err, "save failed")
+		return fmt.Errorf("could not save the session: %w", err)
+	}
+	logx.Debugf("session", "saved %d bytes: %s", len(data), s.Summary())
+	return nil
+}
+
+// Summary describes what the session holds, for logs - never any token values.
+func (s *Session) Summary() string {
+	if s == nil {
+		return "none"
+	}
+	mme := "no mme"
+	if s.MME != nil {
+		mme = fmt.Sprintf("mme{dsid=%v auth=%v ck-user=%v tokens=%d}", s.MME.DSID != "", s.MME.MmeAuthToken != "", s.MME.CloudKitUserID != "", len(s.MME.Tokens))
+	}
+	oct := "no octagon"
+	if s.Octagon != nil {
+		oct = fmt.Sprintf("octagon{peer=%v joined=%v sponsor=%v}", s.Octagon.PeerID != "", s.Octagon.Joined, s.Octagon.Sponsor != nil)
+	}
+	return fmt.Sprintf("user=%q pet=%v password-saved=%v webservices=%d apptokens=%d webauth=%v %s %s",
+		s.Username, s.PET != "", s.Password != "", len(s.Webservices), len(s.AppTokens), s.WebAuth != nil, mme, oct)
 }
 
 // Load reads the session; (nil, nil) when none is stored.
@@ -138,6 +161,7 @@ func Load() (*Session, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, fmt.Errorf("corrupt session: %w", err)
 	}
+	logx.Debugf("session", "loaded %d bytes: %s", len(data), s.Summary())
 	return &s, nil
 }
 

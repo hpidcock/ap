@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hpidcock/ap/internal/hme"
+	"github.com/hpidcock/ap/internal/logx"
 	"github.com/hpidcock/ap/internal/paths"
 	"github.com/hpidcock/ap/internal/vault"
 )
@@ -62,16 +63,29 @@ func fileExists(p string) bool {
 }
 
 func main() {
+	// The browser owns stdio, so diagnostics go to AP_LOG_FILE (AP_DEBUG=1 would spill
+	// into the browser's own log, which is still useful when debugging the extension).
+	_ = logx.InitFromEnv()
+	defer logx.Close()
+	logx.Debugf("ap-host", "started pid=%d", os.Getpid())
 	maybeTriggerSync()
 	store, err := vault.LoadVault()
 	if err != nil || store == nil {
+		logx.Errorf("ap-host", err, "vault unavailable, serving an empty store")
 		store = vault.NewStore(nil)
+	} else {
+		logx.Debugf("ap-host", "vault loaded: %d credential(s)", store.Len())
 	}
 	aliases, err := hme.LoadAliases()
 	if err != nil {
+		logx.Errorf("ap-host", err, "alias cache unavailable")
 		aliases = nil
+	} else {
+		logx.Debugf("ap-host", "alias cache loaded: %d alias(es)", len(aliases))
 	}
 	if err := vault.Serve(store, aliases, os.Stdin, os.Stdout); err != nil {
+		logx.Errorf("ap-host", err, "serve ended")
 		os.Exit(1)
 	}
+	logx.Debugf("ap-host", "browser closed the pipe, exiting")
 }

@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/hpidcock/ap/internal/logx"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -215,6 +216,11 @@ func (s *Session) do(method, rawURL string, headers http.Header, params url.Valu
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	s.capture(resp)
+	if resp.StatusCode/100 != 2 {
+		logx.Debugf("webauth", "%s %s: HTTP %d: %s", method, req.URL.Path, resp.StatusCode, reasonOr(jsonOrNil(raw), resp))
+	} else {
+		logx.Debugf("webauth", "%s %s: HTTP %d", method, req.URL.Path, resp.StatusCode)
+	}
 	return resp, raw, nil
 }
 
@@ -348,11 +354,13 @@ func (s *Session) Signin(username, password, trustToken string) error {
 		return err
 	}
 	if resp.StatusCode == http.StatusConflict {
+		logx.Debugf("webauth", "signin/complete: 409, 2FA required (trust token sent: %v)", trustToken != "")
 		s.NeedsTwoFA = true
 		return nil
 	}
 	s.NeedsTwoFA = false
 	if ok(resp) {
+		logx.Debugf("webauth", "signin/complete ok (trust token sent: %v)", trustToken != "")
 		return nil
 	}
 	return errorf("sign-in failed (HTTP %d): %s", resp.StatusCode, reasonOr(jsonOrNil(raw), resp))
@@ -412,6 +420,7 @@ func (s *Session) AccountLogin() (map[string]any, error) {
 	if r := reason(data); r != "" || !ok(resp) {
 		return nil, errorf("accountLogin failed (HTTP %d): %s", resp.StatusCode, reasonOr(data, resp))
 	}
+	logx.Debugf("webauth", "accountLogin ok: keys=%v hsaChallengeRequired=%v webservices=%d", logx.Keys(data), HSAChallengeRequired(data), len(ExtractWebservices(data)))
 	return data, nil
 }
 

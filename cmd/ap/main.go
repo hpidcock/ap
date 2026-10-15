@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"syscall"
@@ -23,6 +24,7 @@ import (
 	"github.com/hpidcock/ap/internal/hme"
 	"github.com/hpidcock/ap/internal/hostinstall"
 	"github.com/hpidcock/ap/internal/icloud"
+	"github.com/hpidcock/ap/internal/logx"
 	"github.com/hpidcock/ap/internal/octagon"
 	"github.com/hpidcock/ap/internal/paths"
 	"github.com/hpidcock/ap/internal/plistx"
@@ -46,7 +48,39 @@ Commands:
   sync          refresh your passwords now
   logout        sign out (use --wipe-device to also forget this device)
   install-host  register the browser extension's native-messaging host
+
+Diagnostics (accepted anywhere on the command line):
+  --debug           log every step and Apple exchange to stderr (secrets redacted)
+  --trace           like --debug, plus request and response bodies
+  --log-file PATH   append the full trace to PATH (0600) whether or not --debug is set
+  AP_DEBUG=1|2 and AP_LOG_FILE=PATH do the same from the environment (also for ap-host)
 `)
+}
+
+// debugFlags pulls the diagnostic flags out of args wherever they appear, so that both
+// `ap --debug login` and `ap login --debug` work, and merges them with the environment.
+func debugFlags(args []string) (rest []string, level logx.Level, logFile string) {
+	level = logx.ParseLevel(os.Getenv("AP_DEBUG"))
+	logFile = os.Getenv("AP_LOG_FILE")
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--debug" || a == "-debug" || a == "-v":
+			if level < logx.Debug {
+				level = logx.Debug
+			}
+		case a == "--trace" || a == "-trace" || a == "-vv":
+			level = logx.Trace
+		case strings.HasPrefix(a, "--log-file=") || strings.HasPrefix(a, "-log-file="):
+			logFile = a[strings.Index(a, "=")+1:]
+		case (a == "--log-file" || a == "-log-file") && i+1 < len(args):
+			logFile = args[i+1]
+			i++
+		default:
+			rest = append(rest, a)
+		}
+	}
+	return rest, level, logFile
 }
 
 func main() {
@@ -54,6 +88,14 @@ func main() {
 }
 
 func run(args []string) int {
+	args, level, logFile := debugFlags(args)
+	if err := logx.Init(level, logFile); err != nil {
+		ui.Err("%v", err)
+		return 2
+	}
+	defer logx.Close()
+	cfgDir, _ := paths.ConfigDir()
+	logx.Debugf("ap", "ap starting: args=%v %s config=%s log-level=%d", args, runtime.Version(), cfgDir, level)
 	global := flag.NewFlagSet("ap", flag.ContinueOnError)
 	global.Usage = usage
 	if err := global.Parse(args); err != nil {
@@ -88,10 +130,15 @@ func run(args []string) int {
 	}
 	if err != nil {
 		ui.Err("%v", err)
+		logx.Errorf("ap", err, "%s failed", cmd)
+		if !logx.Enabled() {
+			ui.Step("(re-run with --debug for a full trace, or --log-file PATH to save one)")
+		}
 		if rc == 0 {
 			rc = 1
 		}
 	}
+	logx.Debugf("ap", "%s finished rc=%d after %s", cmd, rc, logx.Elapsed())
 	return rc
 }
 
@@ -114,24 +161,18 @@ func nonInteractiveTwoFA(string) (string, error) {
 		"machine identity likely changed) - run `ap login` once interactively to re-establish trust"}
 }
 
-// mintPET mints a fresh GSA PET for escrowproxy Basic auth. Silent on an already-trusted
-// device; kept fresh per phase because the PET is short-lived.
-func mintPET(dev *device.Device, anis anisette.Provider, username, password string) (string, error) {
+// mintPET mints a fresh GSA PET for escrowproxy Basic auth and returns it with its
+// expiry. Silent on an already-trusted device.
+func mintPET(dev *device.Device, anis anisette.Provider, username, password string) (string, time.Time, error) {
 	spd, err := gsa.AuthenticateWith2FA(gsa.NewClient(dev, anis), username, password, twoFAPrompt)
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
-	_, pet, _, err := gsa.ExtractPET(spd)
-	return pet, err
-}
-
-func keysOf(m map[string]any) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
+	_, pet, expiryMS, err := gsa.ExtractPET(spd)
+	if err != nil {
+		return "", time.Time{}, err
 	}
-	sort.Strings(out)
-	return out
+	return pet, time.UnixMilli(expiryMS), nil
 }
 
 func describeBottle(b octagon.Bottle) string {
@@ -190,14 +231,8 @@ func refreshWebservices(s *session.Session, dev *device.Device, anis anisette.Pr
 		return 0, &icloud.Error{Msg: fmt.Sprintf("iCloud rejected the token: %s", plistx.Str(data["status-message"]))}
 	}
 	ws := icloud.ExtractWebservices(data)
-	if os.Getenv("AP_DEBUG") != "" {
-		names := make([]string, 0, len(ws))
-		for k := range ws {
-			names = append(names, k)
-		}
-		sort.Strings(names)
-		ui.Step("account settings: dataclasses %v, services %v", keysOf(plistx.Dict(data["com.apple.mobileme"])), names)
-	}
+	logx.Debugf("icloud", "account settings: HTTP %d keys=%v dataclasses=%v services=%v", status,
+		logx.Keys(data), logx.Keys(plistx.Dict(data["com.apple.mobileme"])), logx.Keys(ws))
 	if len(ws) == 0 {
 		return 0, nil
 	}
@@ -222,6 +257,8 @@ func mintTokens(s *session.Session, username, password string, dev *device.Devic
 	if err != nil {
 		return err
 	}
+	logx.Debugf("login", "GSA sign-in ok: dsid=%s pet-expiry=%s app-tokens=%v", dsid,
+		time.UnixMilli(petExpiry).Format(time.RFC3339), logx.Keys(plistx.Dict(spd["t"])))
 	s.Username = username
 	s.DSID = dsid
 	s.DSIDNumeric = plistx.Str(spd["DsPrsId"])
@@ -249,6 +286,7 @@ func mintTokens(s *session.Session, username, password string, dev *device.Devic
 		mme.Tokens[k] = plistx.Str(v)
 	}
 	mme.MintedAt = time.Now().Unix()
+	logx.Debugf("login", "mobileme login ok: mme-dsid=%s mmeAuthToken=%v service tokens=%v", mmeDSID, mmeToken != "", logx.Keys(mme.Tokens))
 	return nil
 }
 
@@ -263,6 +301,7 @@ func ensureFreshTokens(s *session.Session, dev *device.Device, anis anisette.Pro
 	if !errors.As(err, &ierr) || s.Password == "" || s.Username == "" {
 		return err
 	}
+	logx.Errorf("sync", err, "account settings refresh failed; re-authenticating with the saved password")
 	ui.Step("iCloud token expired - re-authenticating with the saved password...")
 	twofa := twoFAPrompt
 	if !interactive {
@@ -291,6 +330,7 @@ func cmdLogin(args []string) (int, error) {
 	if _, err := anis.Headers(); err != nil { // fail fast: downloads/provisions ADI on first use
 		return 2, err
 	}
+	logx.Debugf("login", "device id=%s serial=%s; anisette ready", dev.DeviceID, dev.Serial)
 	prior, err := session.Load()
 	if err != nil {
 		return 1, err
@@ -298,6 +338,7 @@ func cmdLogin(args []string) (int, error) {
 	if prior == nil {
 		prior = &session.Session{}
 	}
+	logx.Debugf("login", "prior session: %s", prior.Summary())
 	user := *username
 	if user == "" {
 		prompt := "Apple ID: "
@@ -334,7 +375,9 @@ func cmdLogin(args []string) (int, error) {
 	}
 
 	mmeOK := false
+	logx.Debugf("login", "signing in as %s", user)
 	if err := mintTokens(s, user, password, dev, anis, twoFAPrompt); err != nil {
+		logx.Errorf("login", err, "token mint failed")
 		var ierr *icloud.Error
 		if errors.As(err, &ierr) {
 			ui.Warn("could not mint the persistent mmeAuthToken: %v", err)
@@ -385,9 +428,10 @@ func joinAndSync(s *session.Session, dev *device.Device, anis anisette.Provider,
 	}
 	escrowHost := s.Webservices["keychainsync"]
 	if escrowHost == "" {
-		ui.Err("no escrow URL cached - cannot join the keychain")
+		ui.Err("no escrow URL cached (services: %v) - cannot join the keychain", logx.Keys(s.Webservices))
 		return 1
 	}
+	logx.Debugf("join", "escrow host %s; peer identity %v", escrowHost, s.Octagon != nil && s.Octagon.PeerID != "")
 	if _, err := octagon.EnsurePeerIdentity(s, dev); err != nil {
 		ui.Err("%v", err)
 		return 1
@@ -400,15 +444,20 @@ func joinAndSync(s *session.Session, dev *device.Device, anis anisette.Provider,
 	}
 	_ = session.Save(s) // persist the cloudKitUserId resolved by ckAppInit
 	ui.Step("Discovering escrow bottles...")
-	listPET, err := mintPET(dev, anis, username, password)
+	pet, petExpiry, err := mintPET(dev, anis, username, password)
 	if err != nil {
 		ui.Err("%v", err)
 		return 1
 	}
+	listPET := pet
 	bottles, err := client.ListRecoverableBottles(escrowHost, username, listPET, func(m string) { ui.Warn("%s", m) })
 	if err != nil {
+		logx.Errorf("join", err, "bottle discovery failed")
 		ui.Err("%v", err)
 		return 1
+	}
+	for _, b := range bottles {
+		logx.Debugf("join", "bottle %s: %s (meta keys %v)", b.ID, describeBottle(b), logx.Keys(b.Meta))
 	}
 	if len(bottles) == 0 {
 		ui.Err("no recoverable escrow bottle - cannot join via this path")
@@ -419,18 +468,21 @@ func joinAndSync(s *session.Session, dev *device.Device, anis anisette.Provider,
 		ui.Out("Aborted before selecting a bottle - no escrow attempt spent. You're signed in but NOT joined; run `ap login` again to retry the keychain join.")
 		return 0
 	}
+	logx.Debugf("join", "chosen bottle %s", chosen.ID)
 	ui.Out("Joining iCloud Keychain will use the passcode of: %s", describeBottle(*chosen))
 	ui.Out("This is IRREVERSIBLE - a wrong passcode spends 1 of ~10 attempts, and the 10th failed attempt destroys the escrow record permanently.")
 	if !ui.ConfirmYN("Proceed? (y/N) ") {
 		ui.Out("Aborted - no escrow attempt spent. You're signed in but NOT joined; run `ap login` again to retry the keychain join.")
 		return 0
 	}
-	// Mint a fresh PET right before the irreversible recovery so it can't expire during
-	// the selection/confirmation delay above.
-	pet, err := mintPET(dev, anis, username, password)
-	if err != nil {
-		ui.Err("sign-in failed: %v", err)
-		return 1
+	// Re-mint the PET before the irreversible recovery only if the one from the listing
+	// could expire during the passcode prompt: every extra GSA sign-in risks Apple's
+	// throttling (HTTP 503) at the worst moment.
+	if time.Until(petExpiry) < 5*time.Minute {
+		if pet, _, err = mintPET(dev, anis, username, password); err != nil {
+			ui.Err("sign-in failed: %v", err)
+			return 1
+		}
 	}
 	passcode, err := ui.Secret("Device passcode / iCloud Security Code for that device: ")
 	if err != nil || passcode == "" {
@@ -547,6 +599,7 @@ func fetchAliasesBestEffort(interactive bool) []hme.Alias {
 	}
 	sess, account, err := ensureWebSession(s, interactive)
 	if err != nil {
+		logx.Errorf("hme", err, "web session unavailable")
 		ui.Warn("Hide My Email unavailable: %v", err)
 		return cached()
 	}
@@ -557,9 +610,11 @@ func fetchAliasesBestEffort(interactive bool) []hme.Alias {
 	}
 	aliases, err := hme.NewClient(base, sess.HTTP).List()
 	if err != nil {
+		logx.Errorf("hme", err, "alias list failed")
 		ui.Warn("Hide My Email unavailable: %v", err)
 		return cached()
 	}
+	logx.Debugf("hme", "fetched %d alias(es)", len(aliases))
 	_ = hme.SaveAliases(aliases)
 	return aliases
 }
@@ -779,8 +834,8 @@ func cmdSync(args []string) (int, error) {
 	n, err := client.SyncAndDecrypt()
 	if err != nil {
 		var ckErr *cloudkit.Error
-		if errors.As(err, &ckErr) {
-			return 1, fmt.Errorf("sync failed: %w", err)
+		if errors.As(err, &ckErr) && ckErr.HTTPStatus == 401 {
+			return 1, fmt.Errorf("sync failed: CloudKit rejected the token (%w) - run `ap login` if this persists", err)
 		}
 		return 1, fmt.Errorf("sync failed: %w", err)
 	}

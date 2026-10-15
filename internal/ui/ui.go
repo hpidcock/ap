@@ -10,24 +10,42 @@ import (
 	"strings"
 
 	"golang.org/x/term"
+
+	"github.com/hpidcock/ap/internal/logx"
 )
 
 var stdin = bufio.NewReader(os.Stdin)
 
+// Every line also goes to the diagnostic log (logx), so a log file carries the whole
+// narrative of a run next to the HTTP exchanges.
+
 // Out prints a result line to stdout.
-func Out(format string, a ...any) { fmt.Fprintf(os.Stdout, format+"\n", a...) }
+func Out(format string, a ...any) {
+	fmt.Fprintf(os.Stdout, format+"\n", a...)
+	logx.Debugf("ui", "out: "+format, a...)
+}
 
 // Step prints a progress line to stderr.
-func Step(format string, a ...any) { fmt.Fprintf(os.Stderr, format+"\n", a...) }
+func Step(format string, a ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", a...)
+	logx.Debugf("ui", "step: "+format, a...)
+}
 
 // Warn prints a warning to stderr.
-func Warn(format string, a ...any) { fmt.Fprintf(os.Stderr, "warning: "+format+"\n", a...) }
+func Warn(format string, a ...any) {
+	fmt.Fprintf(os.Stderr, "warning: "+format+"\n", a...)
+	logx.Debugf("ui", "warning: "+format, a...)
+}
 
 // Err prints an error to stderr.
-func Err(format string, a ...any) { fmt.Fprintf(os.Stderr, "error: "+format+"\n", a...) }
+func Err(format string, a ...any) {
+	fmt.Fprintf(os.Stderr, "error: "+format+"\n", a...)
+	logx.Debugf("ui", "error: "+format, a...)
+}
 
-// Ask reads a trimmed line.
+// Ask reads a trimmed line. The answer is not logged.
 func Ask(prompt string) (string, error) {
+	logx.Debugf("ui", "prompt: %s", strings.TrimSpace(prompt))
 	fmt.Fprint(os.Stderr, prompt)
 	line, err := stdin.ReadString('\n')
 	if err != nil && line == "" {

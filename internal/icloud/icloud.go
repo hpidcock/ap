@@ -17,6 +17,7 @@ import (
 	"github.com/hpidcock/ap/internal/anisette"
 	"github.com/hpidcock/ap/internal/device"
 	"github.com/hpidcock/ap/internal/httpx"
+	"github.com/hpidcock/ap/internal/logx"
 	"github.com/hpidcock/ap/internal/plistx"
 )
 
@@ -98,6 +99,8 @@ func LoginMobileMe(username, pet, adsid, clientID string, dev *device.Device, an
 	if !ok {
 		st = data["status"]
 	}
+	logx.Debugf("icloud", "loginDelegates: HTTP %d status=%v (%s) delegates=%v service-data=%v",
+		status, st, plistx.Str(mm["status-message"]), logx.Keys(plistx.Dict(data["delegates"])), logx.Keys(plistx.Dict(mm["service-data"])))
 	if plistx.Int(st) != 0 || st == nil {
 		msg := plistx.Str(mm["status-message"])
 		if msg == "" {
@@ -140,6 +143,7 @@ func FetchAccountSettings(dsid, mmeToken string, dev *device.Device, anis aniset
 	if err != nil {
 		return 0, nil, err
 	}
+	logx.Debugf("icloud", "get_account_settings: HTTP %d (%d bytes)", status, len(raw))
 	data, err := plistx.Decode(raw)
 	if err != nil {
 		return status, nil, &Error{Msg: fmt.Sprintf("get_account_settings returned HTTP %d with an unreadable body", status), HTTPStatus: status}

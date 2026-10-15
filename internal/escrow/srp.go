@@ -28,6 +28,7 @@ import (
 	"github.com/hpidcock/ap/internal/anisette"
 	"github.com/hpidcock/ap/internal/device"
 	"github.com/hpidcock/ap/internal/httpx"
+	"github.com/hpidcock/ap/internal/logx"
 	"github.com/hpidcock/ap/internal/plistx"
 	"github.com/hpidcock/ap/internal/srp"
 )
@@ -288,6 +289,7 @@ func (r *Recovery) invoke(command string, request map[string]any) (map[string]an
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	data, perr := plistx.Decode(raw)
+	logx.Debugf("escrow", "%s: HTTP %d, %d bytes, keys=%v", command, resp.StatusCode, len(raw), logx.Keys(data))
 	if resp.StatusCode/100 != 2 {
 		return nil, gateErrorf("escrowproxy/%s HTTP %d: %v", command, resp.StatusCode, data)
 	}
@@ -372,6 +374,7 @@ func (r *Recovery) TryRecoverEscrow(label string, passcode []byte, confirmIrreve
 	}
 	dsid := plistx.Str(init["dsid"])
 	clubTypeID := plistx.Int(init["clubTypeID"])
+	logx.Debugf("escrow", "srp_init ok: label=%s dsid=%s clubTypeID=%d", label, dsid, clubTypeID)
 	respBlob, err := base64.StdEncoding.DecodeString(plistx.Str(init["respBlob"]))
 	if err != nil {
 		return nil, gateErrorf("srp_init: bad respBlob")
@@ -421,6 +424,7 @@ func (r *Recovery) TryRecoverEscrow(label string, passcode []byte, confirmIrreve
 		return nil, gateErrorf("escrowproxy server proof (M2) mismatch - aborting")
 	}
 	version := binary.BigEndian.Uint32(rh[4:8])
+	logx.Debugf("escrow", "recover ok: server proof verified, record version %d", version)
 	var inner []byte
 	switch version {
 	case 0:
@@ -449,6 +453,7 @@ func (r *Recovery) TryRecoverEscrow(label string, passcode []byte, confirmIrreve
 	}
 	rounds := int(binary.BigEndian.Uint32(ih[8:12]))
 	salt2 := ipayloads[1]
+	logx.Debugf("escrow", "inner record: pbkdf2 rounds=%d", rounds)
 	derived, err := pbkdf2.Key(sha256.New, string(passcode), salt2, rounds, 16)
 	if err != nil {
 		return nil, err
@@ -463,7 +468,8 @@ func (r *Recovery) TryRecoverEscrow(label string, passcode []byte, confirmIrreve
 	}
 	entropy := plistx.Bytes(bottle["BottledPeerEntropy"])
 	if entropy == nil {
-		return nil, gateErrorf("recover: bottle has no BottledPeerEntropy")
+		return nil, gateErrorf("recover: bottle has no BottledPeerEntropy (keys %v)", logx.Keys(bottle))
 	}
+	logx.Debugf("escrow", "bottle decrypted: keys=%v entropy=%d bytes", logx.Keys(bottle), len(entropy))
 	return entropy, nil
 }

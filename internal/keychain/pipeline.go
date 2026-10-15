@@ -3,6 +3,7 @@ package keychain
 import (
 	"crypto/ecdh"
 	"encoding/base64"
+	"github.com/hpidcock/ap/internal/logx"
 	"sort"
 	"strings"
 	"time"
@@ -100,36 +101,46 @@ func asInt(v any) (int64, bool) {
 // {uuid(1), zoneName(2), keyclass(3), key(4)} - NOT raw TLK bytes.
 func UnwrapTLKShares(shares []cloudkit.Record, ourPeerID string, encKey *ecdh.PrivateKey) map[string][]byte {
 	tlks := map[string][]byte{}
+	skipped := map[string]int{}
 	for _, share := range shares {
 		if share.Str("receiver") != ourPeerID {
+			skipped["other receiver"]++
 			continue
 		}
 		wrapped := share.Str("wrappedkey")
 		if wrapped == "" {
+			skipped["no wrappedkey"]++
 			continue
 		}
 		raw, err := base64.StdEncoding.DecodeString(wrapped)
 		if err != nil {
+			skipped["bad base64"]++
 			continue
 		}
 		expanded, err := ExpandKeyedArchive(raw)
 		if err != nil {
+			skipped["bad keyed archive"]++
 			continue
 		}
 		ies, _ := expanded.(map[string]any)
 		if ies == nil {
+			skipped["archive not a dict"]++
 			continue
 		}
 		serialized, err := ECIESDecryptSF(encKey, ies)
 		if err != nil {
+			skipped["ECIES decrypt failed"]++
 			continue // skip a poisoned/foreign share, keep the rest
 		}
 		f := proto.MustDecode(serialized)
 		keyID, tlk := f.String(1), f.Bytes(4)
 		if keyID != "" && len(tlk) > 0 {
 			tlks[keyID] = tlk
+		} else {
+			skipped["empty TLK"]++
 		}
 	}
+	logx.Debugf("keychain", "tlkshares: %d in, %d TLK(s) unwrapped, skipped %v", len(shares), len(tlks), skipped)
 	return tlks
 }
 
@@ -137,45 +148,59 @@ func UnwrapTLKShares(shares []cloudkit.Record, ourPeerID string, encKey *ecdh.Pr
 // its parent TLK.
 func UnwrapClassKeys(synckeys []cloudkit.Record, tlks map[string][]byte) map[string][]byte {
 	keys := map[string][]byte{}
+	skipped := map[string]int{}
 	for _, sk := range synckeys {
 		tlk, ok := tlks[sk.Str("parentkeyref")]
 		if !ok {
+			skipped["no TLK for parent"]++
 			continue
 		}
 		wrapped := sk.Str("wrappedkey")
 		if wrapped == "" {
+			skipped["no wrappedkey"]++
 			continue
 		}
 		raw, err := base64.StdEncoding.DecodeString(wrapped)
 		if err != nil {
+			skipped["bad base64"]++
 			continue
 		}
 		key, err := SIVUnwrap(tlk, raw)
 		if err != nil {
+			skipped["SIV unwrap failed"]++
 			continue
 		}
 		keys[sk.Name] = key
 	}
+	logx.Debugf("keychain", "synckeys: %d in, %d class key(s) unwrapped, skipped %v", len(synckeys), len(keys), skipped)
 	return keys
 }
 
 // DecryptItems decrypts each item record whose parent class key we hold -> item plist dict.
 func DecryptItems(items []cloudkit.Record, classKeys map[string][]byte) []map[string]any {
 	var out []map[string]any
+	skipped := map[string]int{}
 	for _, it := range items {
 		parent := it.Str("parentkeyref")
 		ck, ok := classKeys[parent]
 		data := it.Bytes("data")
 		wrapped := it.Str("wrappedkey")
-		if !ok || data == nil || wrapped == "" {
+		if !ok {
+			skipped["no class key for parent"]++
+			continue
+		}
+		if data == nil || wrapped == "" {
+			skipped["missing data/wrappedkey"]++
 			continue
 		}
 		rawWrapped, err := base64.StdEncoding.DecodeString(wrapped)
 		if err != nil {
+			skipped["bad base64"]++
 			continue
 		}
 		itemKey, err := SIVUnwrap(ck, rawWrapped)
 		if err != nil {
+			skipped["item key unwrap failed"]++
 			continue
 		}
 		encver := int64(2)
@@ -189,16 +214,21 @@ func DecryptItems(items []cloudkit.Record, classKeys map[string][]byte) []map[st
 		aad := AuthenticatedDataV2(it.Name, it.Fields, encver, gen, parent)
 		plaintext, err := DecryptItem(itemKey, data, aad)
 		if err != nil {
+			skipped["AEAD decrypt failed"]++
 			continue
 		}
 		var v any
 		if _, err := plist.Unmarshal(plaintext, &v); err != nil {
+			skipped["plaintext not a plist"]++
 			continue
 		}
 		if m, ok := v.(map[string]any); ok {
 			out = append(out, m)
+		} else {
+			skipped["plist not a dict"]++
 		}
 	}
+	logx.Debugf("keychain", "items: %d in, %d decrypted, skipped %v", len(items), len(out), skipped)
 	return out
 }
 
