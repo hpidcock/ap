@@ -26,9 +26,13 @@ const (
 	AccountSettingsURL = "https://setup.icloud.com/setup/get_account_settings"
 
 	// AOSKit/accountsd identity for the iCloud setup endpoints (distinct from the GSA akd UA).
-	UserAgent  = "com.apple.iCloudHelper/282 CFNetwork/1408.0.4 Darwin/22.5.0"
-	ClientInfo = device.Description + " <com.apple.AOSKit/282 (com.apple.accountsd/113)>"
+	UserAgent = "com.apple.iCloudHelper/282 CFNetwork/1408.0.4 Darwin/22.5.0"
 )
+
+// ClientInfo is the X-Mme-Client-Info for setup.icloud.com.
+func ClientInfo() string {
+	return device.Description + " <com.apple.AOSKit/282 (com.apple.accountsd/113)>"
+}
 
 // Error is an iCloud setup failure.
 type Error struct {
@@ -75,7 +79,7 @@ func LoginMobileMe(username, pet, adsid, clientID string, dev *device.Device, an
 	headers := map[string]string{
 		"X-Apple-ADSID":     adsid,
 		"User-Agent":        UserAgent,
-		"X-Mme-Client-Info": ClientInfo,
+		"X-Mme-Client-Info": ClientInfo(),
 		"Accept":            "*/*",
 	}
 	ih, err := device.IdentityHeaders(dev, anis)
@@ -128,7 +132,7 @@ func FetchAccountSettings(dsid, mmeToken string, dev *device.Device, anis aniset
 	}
 	headers := map[string]string{
 		"Authorization":     Basic(dsid, mmeToken),
-		"X-Mme-Client-Info": ClientInfo,
+		"X-Mme-Client-Info": ClientInfo(),
 		"User-Agent":        UserAgent,
 		"Accept":            "*/*",
 	}

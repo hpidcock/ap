@@ -19,10 +19,62 @@ import (
 )
 
 // Description is the hardware/OS part of every X-Mme-Client-Info ap sends. Since
-// 2026-10-12 Apple rejects requests whose client info claims macOS while the anisette
-// machine data comes from the Android CoreADI library (GSA: ec=-80045, setup.icloud.com:
-// status 1), so ap describes itself as the Android device the library really is.
-const Description = "<Pixel 7> <Android;14;UQ1A.240205.002>"
+// 2026-10-12 Apple checks it against the platform of the library that produced the
+// anisette machine data (a mismatch is ec=-80045 on GrandSlam and status 1 on
+// setup.icloud.com), and since 2026-10-15 it blocks Android outright (HTTP 503), which is
+// the only platform ap's in-process library can claim. The anisette provider therefore
+// decides: SetClientInfo is called at startup with what the provider's machine data is
+// valid for, and this default only stands for the in-process provider.
+var Description = "<MacBookPro18,3> <Mac OS X;13.4.1;22F8>"
+
+var gsaClientInfo, gsaUserAgent string
+
+// SetClientInfo records the client info and user agent the anisette machine data is
+// bound to. GrandSlam gets them verbatim; the other services keep their own app part
+// behind the same device description.
+func SetClientInfo(clientInfo, userAgent string) {
+	gsaClientInfo, gsaUserAgent = clientInfo, userAgent
+	if d := DescriptionOf(clientInfo); d != "" {
+		Description = d
+	}
+}
+
+// DescriptionOf returns the first two <...> groups of a client-info string, or "".
+func DescriptionOf(clientInfo string) string {
+	var groups []string
+	for rest := clientInfo; len(groups) < 2; {
+		start := strings.Index(rest, "<")
+		if start < 0 {
+			break
+		}
+		end := strings.Index(rest[start:], ">")
+		if end < 0 {
+			break
+		}
+		groups = append(groups, rest[start:start+end+1])
+		rest = rest[start+end+1:]
+	}
+	if len(groups) != 2 {
+		return ""
+	}
+	return groups[0] + " " + groups[1]
+}
+
+// GSAClientInfo is the X-MMe-Client-Info for gsa.apple.com.
+func GSAClientInfo() string {
+	if gsaClientInfo != "" {
+		return gsaClientInfo
+	}
+	return Description + " <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
+}
+
+// GSAUserAgent is the User-Agent for gsa.apple.com.
+func GSAUserAgent() string {
+	if gsaUserAgent != "" {
+		return gsaUserAgent
+	}
+	return "akd/1.0 CFNetwork/808.1.4"
+}
 
 // Device is the local identity.
 type Device struct {

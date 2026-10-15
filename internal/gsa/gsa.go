@@ -25,14 +25,10 @@ import (
 	"github.com/hpidcock/ap/internal/srp"
 )
 
-// Static identity strings sent with every GSA request; the device part comes from
-// device.Description (see there for why it is Android). These match what iloader /
-// isideload send since Apple's 2026-10-12 change.
-const (
-	UserAgent  = "akd/1.0 CFNetwork/808.1.4"
-	ClientInfo = device.Description + " <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
-	Endpoint   = "https://gsa.apple.com/grandslam/GsService2"
-)
+// Endpoint is the GrandSlam service. The identity strings sent with every request come
+// from the device package (device.GSAClientInfo / device.GSAUserAgent), which the
+// anisette provider sets at startup.
+const Endpoint = "https://gsa.apple.com/grandslam/GsService2"
 
 // Error is a GrandSlam failure.
 type Error struct{ Msg string }
@@ -103,8 +99,8 @@ func (c *Client) request(params map[string]any) (map[string]any, error) {
 	}
 	httpReq.Header.Set("Content-Type", "text/x-xml-plist")
 	httpReq.Header.Set("Accept", "*/*")
-	httpReq.Header.Set("User-Agent", UserAgent)
-	httpReq.Header.Set("X-MMe-Client-Info", ClientInfo)
+	httpReq.Header.Set("User-Agent", device.GSAUserAgent())
+	httpReq.Header.Set("X-MMe-Client-Info", device.GSAClientInfo())
 	httpReq.Header.Set("Connection", "close")
 	resp, raw, err := c.doWithRetry(httpReq, data, op)
 	if err != nil {
@@ -179,10 +175,26 @@ func (c *Client) Authenticate(username, password, stage string) (map[string]any,
 	if err != nil {
 		return nil, nil, err
 	}
-	initResp, err := c.request(map[string]any{
-		"A2k": usr.PublicA(), "ps": []any{"s2k", "s2k_fo"}, "u": username, "o": "init"})
+	initParams := map[string]any{"A2k": usr.PublicA(), "ps": []any{"s2k", "s2k_fo"}, "u": username, "o": "init"}
+	initResp, err := c.request(initParams)
 	if err != nil {
 		return nil, nil, err
+	}
+	// hsc 434: Apple wants the anisette machine data re-synchronised with the data it
+	// hands back before it will look at the account. Providers that can do that (the
+	// remote server does) get one retry.
+	if sim := resyncData(initResp); sim != "" {
+		rs, ok := c.Anisette.(anisette.Resyncer)
+		if !ok {
+			return nil, nil, errorf("%s: Apple asked for an anisette resync (hsc 434), which this anisette provider cannot do", stage)
+		}
+		debugf("%s: anisette resync requested (hsc 434), syncing then retrying init", stage)
+		if _, err := rs.Resync(sim); err != nil {
+			return nil, nil, err
+		}
+		if initResp, err = c.request(initParams); err != nil {
+			return nil, nil, err
+		}
 	}
 	c.LastInitResponse = initResp
 	if !plistx.Has(initResp["sp"]) {
@@ -230,6 +242,22 @@ func (c *Client) Authenticate(username, password, stage string) (map[string]any,
 	return complete, spd, nil
 }
 
+// resyncData returns the base64 X-Apple-I-MD-DATA of a response whose Status demands
+// an anisette resync (hsc 434), or "".
+func resyncData(resp map[string]any) string {
+	status := plistx.Dict(resp["Status"])
+	if plistx.Int(status["hsc"]) != 434 {
+		return ""
+	}
+	switch v := status["X-Apple-I-MD-DATA"].(type) {
+	case []byte:
+		return base64.StdEncoding.EncodeToString(v)
+	case string:
+		return v
+	}
+	return ""
+}
+
 func decryptCBC(sessionKey, data []byte) ([]byte, error) {
 	key := srp.DeriveKey(sessionKey, "extra data key:")
 	iv := srp.DeriveKey(sessionKey, "extra data iv:")[:16]
@@ -264,7 +292,7 @@ func (c *Client) twoFAHeaders(dsid, idmsToken string) (http.Header, error) {
 	h.Set("X-Apple-Identity-Token", base64.StdEncoding.EncodeToString([]byte(dsid+":"+idmsToken)))
 	h.Set("X-Apple-App-Info", "com.apple.gs.xcode.auth")
 	h.Set("X-Xcode-Version", "11.2 (11B41)")
-	h.Set("X-Mme-Client-Info", ClientInfo)
+	h.Set("X-Mme-Client-Info", device.GSAClientInfo())
 	ih, err := device.IdentityHeaders(c.Device, c.Anisette)
 	if err != nil {
 		return nil, err

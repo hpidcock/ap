@@ -1,11 +1,25 @@
 // Package anisette defines where the "machine validation data" (X-Apple-I-MD /
-// X-Apple-I-MD-M) GrandSlam requires comes from. The implementation is package local,
-// which generates it in-process with Apple's CoreADI library.
+// X-Apple-I-MD-M) GrandSlam requires comes from. Package remote fetches it from an
+// anisette-v3 server (the default); package local generates it in-process with Apple's
+// Android CoreADI library.
 package anisette
 
 // Provider produces a fresh set of anisette headers for one request.
 type Provider interface {
 	Headers() (map[string]string, error)
+}
+
+// Resyncer is implemented by providers that can answer GrandSlam's "anisette resync"
+// demand (Status.hsc == 434): Apple hands back X-Apple-I-MD-DATA, the provider feeds it
+// to ADI and returns fresh machine data to retry the request with.
+type Resyncer interface {
+	Resync(simBase64 string) (map[string]string, error)
+}
+
+// ClientInfoProvider is implemented by providers whose machine data is only valid for a
+// particular X-Mme-Client-Info / User-Agent pair (Apple checks the platform).
+type ClientInfoProvider interface {
+	ClientInfo() (clientInfo, userAgent string, err error)
 }
 
 // Error is an anisette failure.

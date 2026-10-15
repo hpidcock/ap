@@ -55,9 +55,15 @@ func SyncLockFile() string { return in("sync.lock") }
 // SyncAttemptFile debounces the background sync trigger from the native host.
 func SyncAttemptFile() string { return in("sync.attempt") }
 
-// AnisetteDir is where the embedded anisette server keeps its state
+// AnisetteDir is where the in-process anisette provider keeps its state
 // (Apple's ADI libraries, the machine identity and the provisioning data).
 func AnisetteDir() string { return in("anisette") }
+
+// AnisetteConfigFile records which anisette provider was chosen ("local" or a server URL).
+func AnisetteConfigFile() string { return in("anisette-provider.json") }
+
+// RemoteAnisetteFile is the remote provider's machine identity and provisioning blob.
+func RemoteAnisetteFile() string { return in("anisette-remote.json") }
 
 // WritePrivate writes data to path with mode 0600 from creation, so a secret never
 // exists world-readable even briefly.

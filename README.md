@@ -13,8 +13,9 @@ This project is a Go rewrite of two upstream projects, combined into one binary:
   native-messaging host, and the browser extension (kept as-is under `extension/`).
 - [Dadoum/anisette-v3-server](https://github.com/Dadoum/anisette-v3-server) (D) and the
   [Dadoum/Provision](https://github.com/Dadoum/Provision) library it is built on - the code that
-  produces the machine data Apple's sign-in requires. Only that part is ported, built straight
-  into `ap login` and `ap sync`, so no anisette server or Docker container is needed.
+  produces the machine data Apple's sign-in requires. `ap` speaks the anisette-v3 protocol to
+  such a server (the default), and also carries a Go port of the Android ADI side so it can
+  generate the data in process (`--anisette local`), which Apple has blocked since 2026-10-15.
 
 Like the upstream project this is a reverse-engineering effort, **not affiliated with Apple**,
 and it is untested with Advanced Data Protection enabled.
@@ -24,17 +25,30 @@ and it is untested with Advanced Data Protection enabled.
 ```
 ap login / ap sync ──► gsa.apple.com, setup.icloud.com, gateway.icloud.com (CloudKit)
         │
-        │ every request carries X-Apple-I-MD* machine data, generated in-process by
-        └─► Apple's CoreADI (libCoreADI.so, loaded by a small ELF loader)
+        │ every request carries X-Apple-I-MD* machine data, fetched from an
+        └─► anisette-v3 server (default) or generated in-process by Apple's CoreADI
 
 ~/.config/ap/vault.enc  ◄──  ap-host (native-messaging)  ◄──  browser extension
 ```
 
-On first use `ap` downloads `libCoreADI.so` / `libstoreservicescore.so` from Apple's public
-Apple Music for Android package into `~/.config/ap/anisette/lib`, loads them with a small
-in-process ELF loader (`internal/anisette/local/androidlib`), provisions a machine identity
-with Apple once, and from then on generates the anisette headers itself whenever it talks to
-Apple. No server runs in the background.
+The machine data is the part Apple keeps moving. Since October 2026 Apple checks the
+client-info string of every request against the platform of the library that produced the
+machine data, and blocks the Android library outright, so by default `ap` uses an anisette-v3
+server instead: on first use it generates a random machine identifier, runs Apple's
+provisioning handshake once with the server answering the cryptographic challenge, stores the
+identifier and the provisioning blob Apple issued in `~/.config/ap/anisette-remote.json`, and
+from then on asks the server to turn them into a one-time password before each request. The
+server also tells `ap` which client info its machine data is valid for. It never sees your
+Apple ID, password or any token. The default server is the one isideload and iloader use
+(`https://ani.jkcoxson.com`); `--anisette URL` picks another, such as your own
+[anisette-v3-server](https://github.com/Dadoum/anisette-v3-server), and the choice is
+remembered for later runs.
+
+`--anisette local` keeps everything in process instead: `ap` downloads `libCoreADI.so` /
+`libstoreservicescore.so` from Apple's public Apple Music for Android package into
+`~/.config/ap/anisette/lib`, loads them with a small ELF loader
+(`internal/anisette/local/androidlib`), provisions once and generates the headers itself. It is
+kept for when Apple accepts Android client info again.
 
 ## Install
 
@@ -170,9 +184,11 @@ cookies, 2FA codes, anisette machine data, and passwords, proofs and PETs inside
 still names your Apple ID, device IDs and the devices in your escrow bottles, so treat it as private.
 
 Apple error codes `ap` has run into: `-80045` "This action cannot be completed at this time" means
-the client info and the anisette machine data disagree about the device (see `device.Description`),
-`hsc=409` means a 2FA code is already on its way to your trusted devices, and HTTP 503 from
-`gsa.apple.com` is throttling after several sign-ins in a row; `ap` retries that with backoff.
+the client info and the anisette machine data disagree about the platform (switch anisette
+servers, or run `ap logout --wipe-device` to provision afresh), `hsc=409` means a 2FA code is
+already on its way to your trusted devices, and HTTP 503 from `gsa.apple.com` is Apple's edge
+refusing the client info outright (Android since 2026-10-15, Xcode since September 2026) or
+a reused keep-alive connection; `ap` opens a fresh connection per request and retries 429/503.
 
 ## Differences from the upstream projects
 

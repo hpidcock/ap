@@ -28,7 +28,6 @@ const (
 	CKCodeInvokeURL     = "https://gateway.icloud.com/ckcoderouter/api/client/code/invoke"
 	CKDatabaseSyncURL   = "https://gateway.icloud.com/ckdatabase/api/client/record/sync"
 	CKAppInitURL        = "https://gateway.icloud.com/setup/setup/ck/v1/ckAppInit"
-	CKMmeClientInfo     = device.Description + " <com.apple.cloudkit.CloudKitDaemon/1970 (com.apple.cloudd/1970)>"
 	CuttlefishContainer = "com.apple.security.keychain"
 	CuttlefishBundle    = "com.apple.security.cuttlefish" // CKCode (Cuttlefish) requests
 	SecuritydBundle     = "com.apple.securityd"           // CKKS record fetches
@@ -162,7 +161,7 @@ func operationID() string {
 // containerHeaders is the shared header block for ckAppInit and every CKCode/record op.
 func containerHeaders(bundle, container, mmeClientInfo string) http.Header {
 	if mmeClientInfo == "" {
-		mmeClientInfo = CKMmeClientInfo
+		mmeClientInfo = device.Description + " <com.apple.cloudkit.CloudKitDaemon/1970 (com.apple.cloudd/1970)>"
 	}
 	h := http.Header{}
 	set := func(k, v string) { h.Set(k, v) }

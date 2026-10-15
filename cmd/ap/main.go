@@ -5,6 +5,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/hpidcock/ap/internal/anisette"
 	"github.com/hpidcock/ap/internal/anisette/local"
+	"github.com/hpidcock/ap/internal/anisette/remote"
 	"github.com/hpidcock/ap/internal/cloudkit"
 	"github.com/hpidcock/ap/internal/device"
 	"github.com/hpidcock/ap/internal/gsa"
@@ -49,6 +51,12 @@ Commands:
   logout        sign out (use --wipe-device to also forget this device)
   install-host  register the browser extension's native-messaging host
 
+Machine data (accepted anywhere on the command line, remembered for later runs):
+  --anisette URL    use this anisette-v3 server (default: `+remote.DefaultURL+`)
+  --anisette local  generate the machine data in-process with Apple's Android library
+                    (blocked by Apple since 2026-10-15; kept for when that changes)
+  AP_ANISETTE does the same from the environment
+
 Diagnostics (accepted anywhere on the command line):
   --debug           log every step and Apple exchange to stderr (secrets redacted)
   --trace           like --debug, plus request and response bodies
@@ -57,14 +65,24 @@ Diagnostics (accepted anywhere on the command line):
 `)
 }
 
-// debugFlags pulls the diagnostic flags out of args wherever they appear, so that both
-// `ap --debug login` and `ap login --debug` work, and merges them with the environment.
-func debugFlags(args []string) (rest []string, level logx.Level, logFile string) {
+// anisetteChoice is --anisette / AP_ANISETTE for this run ("" = remembered or default).
+var anisetteChoice string
+
+// globalFlags pulls the diagnostic and provider flags out of args wherever they appear,
+// so that both `ap --debug login` and `ap login --debug` work, and merges them with the
+// environment.
+func globalFlags(args []string) (rest []string, level logx.Level, logFile string) {
 	level = logx.ParseLevel(os.Getenv("AP_DEBUG"))
 	logFile = os.Getenv("AP_LOG_FILE")
+	anisetteChoice = os.Getenv("AP_ANISETTE")
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
+		case strings.HasPrefix(a, "--anisette=") || strings.HasPrefix(a, "-anisette="):
+			anisetteChoice = a[strings.Index(a, "=")+1:]
+		case (a == "--anisette" || a == "-anisette") && i+1 < len(args):
+			anisetteChoice = args[i+1]
+			i++
 		case a == "--debug" || a == "-debug" || a == "-v":
 			if level < logx.Debug {
 				level = logx.Debug
@@ -88,7 +106,7 @@ func main() {
 }
 
 func run(args []string) int {
-	args, level, logFile := debugFlags(args)
+	args, level, logFile := globalFlags(args)
 	if err := logx.Init(level, logFile); err != nil {
 		ui.Err("%v", err)
 		return 2
@@ -142,9 +160,67 @@ func run(args []string) int {
 	return rc
 }
 
-// provider returns the anisette machine-data source: the in-process CoreADI generator.
+// provider returns the anisette machine-data source. The choice (--anisette, AP_ANISETTE)
+// is remembered in the config directory so `ap sync` from the timer follows it; with
+// nothing chosen the default anisette-v3 server is used. The provider also decides the
+// client info every Apple request carries.
 func provider() anisette.Provider {
-	return local.NewLocal(paths.AnisetteDir(), func(format string, a ...any) { ui.Step(format, a...) })
+	logf := func(format string, a ...any) { ui.Step(format, a...) }
+	choice := anisetteChoice
+	if choice != "" {
+		if err := saveAnisetteChoice(choice); err != nil {
+			ui.Warn("could not remember the anisette choice: %v", err)
+		}
+	} else {
+		choice = loadAnisetteChoice()
+	}
+	if choice == "" {
+		choice = remote.DefaultURL
+	}
+	var anis anisette.Provider
+	if choice == "local" {
+		anis = local.NewLocal(paths.AnisetteDir(), logf)
+	} else {
+		if !strings.HasPrefix(choice, "http://") && !strings.HasPrefix(choice, "https://") {
+			choice = "https://" + choice
+		}
+		anis = remote.New(choice, paths.RemoteAnisetteFile(), logf)
+	}
+	logx.Debugf("anisette", "provider: %s", choice)
+	if ci, ok := anis.(anisette.ClientInfoProvider); ok {
+		info, ua, err := ci.ClientInfo()
+		if err != nil {
+			ui.Warn("could not learn the client info from the anisette provider: %v", err)
+		} else {
+			device.SetClientInfo(info, ua)
+			logx.Debugf("anisette", "client info %q user agent %q -> device description %q", info, ua, device.Description)
+		}
+	}
+	return anis
+}
+
+type anisetteConfig struct {
+	Provider string `json:"provider"` // "local" or a server URL
+}
+
+func loadAnisetteChoice() string {
+	data, err := os.ReadFile(paths.AnisetteConfigFile())
+	if err != nil {
+		return ""
+	}
+	var cfg anisetteConfig
+	if json.Unmarshal(data, &cfg) != nil {
+		return ""
+	}
+	return cfg.Provider
+}
+
+func saveAnisetteChoice(choice string) error {
+	if loadAnisetteChoice() == choice {
+		return nil
+	}
+	data, _ := json.MarshalIndent(anisetteConfig{Provider: choice}, "", "  ")
+	return paths.WritePrivate(paths.AnisetteConfigFile(), data)
 }
 
 func twoFAPrompt(kind string) (string, error) {
@@ -859,6 +935,9 @@ func cmdLogout(args []string) (int, error) {
 	}
 	ui.Out("Session cleared. Device identity kept (use --wipe-device to remove it).")
 	if *wipe {
+		if err := os.Remove(paths.RemoteAnisetteFile()); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return 1, err
+		}
 		if err := device.Delete(); err != nil {
 			return 1, err
 		}

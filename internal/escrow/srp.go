@@ -228,8 +228,7 @@ var CommandVariant = map[string]string{
 }
 
 const (
-	escrowUserAgent     = "com.apple.sbd/638.100.48 com.apple.iCloudHelper/282"
-	escrowMmeClientInfo = device.Description + " <com.apple.AuthKit/1 (com.apple.sbd/638.100.48)>"
+	escrowUserAgent = "com.apple.sbd/638.100.48 com.apple.iCloudHelper/282"
 )
 
 // NewRecovery returns a Recovery for the KeychainSync escrow proxy host.
@@ -258,7 +257,7 @@ func (r *Recovery) Headers() (map[string]string, error) {
 			hdr[k] = v
 		}
 	}
-	hdr["X-Mme-Client-Info"] = escrowMmeClientInfo
+	hdr["X-Mme-Client-Info"] = device.Description + " <com.apple.AuthKit/1 (com.apple.sbd/638.100.48)>"
 	return hdr, nil
 }
 

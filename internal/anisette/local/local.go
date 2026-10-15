@@ -170,6 +170,12 @@ func (l *Local) AllHeaders() (map[string]string, error) {
 	}, nil
 }
 
+// ClientInfo implements anisette.ClientInfoProvider with the identity the machine was
+// provisioned under.
+func (l *Local) ClientInfo() (string, string, error) {
+	return ClientInfo, "akd/1.0 CFNetwork/808.1.4", nil
+}
+
 // Headers implements anisette.Provider: the forwarded subset of AllHeaders.
 func (l *Local) Headers() (map[string]string, error) {
 	h, err := l.AllHeaders()
