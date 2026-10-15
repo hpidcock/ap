@@ -53,9 +53,10 @@ type Client struct {
 	LastSessionKey       []byte
 }
 
-// NewClient returns a GSA client.
+// NewClient returns a GSA client. Every request uses its own connection: see
+// httpx.ClientNoKeepAlive for why.
 func NewClient(dev *device.Device, anis anisette.Provider) *Client {
-	return &Client{Device: dev, Anisette: anis, HTTP: httpx.Client(10 * time.Second)}
+	return &Client{Device: dev, Anisette: anis, HTTP: httpx.ClientNoKeepAlive(10 * time.Second)}
 }
 
 func debugf(format string, a ...any) { logx.Debugf("gsa", format, a...) }
@@ -104,6 +105,7 @@ func (c *Client) request(params map[string]any) (map[string]any, error) {
 	httpReq.Header.Set("Accept", "*/*")
 	httpReq.Header.Set("User-Agent", UserAgent)
 	httpReq.Header.Set("X-MMe-Client-Info", ClientInfo)
+	httpReq.Header.Set("Connection", "close")
 	resp, raw, err := c.doWithRetry(httpReq, data, op)
 	if err != nil {
 		return nil, err
@@ -255,6 +257,7 @@ func decryptCBC(sessionKey, data []byte) ([]byte, error) {
 func (c *Client) twoFAHeaders(dsid, idmsToken string) (http.Header, error) {
 	h := http.Header{}
 	h.Set("Content-Type", "text/x-xml-plist")
+	h.Set("Connection", "close")
 	h.Set("User-Agent", "Xcode")
 	h.Set("Accept", "text/x-xml-plist")
 	h.Set("Accept-Language", "en-us")

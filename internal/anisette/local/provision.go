@@ -25,14 +25,14 @@ type ProvisioningSession struct {
 
 // NewProvisioningSession returns a session.
 func NewProvisioningSession(a *adi.ADI, m *Machine) *ProvisioningSession {
-	return &ProvisioningSession{ADI: a, Machine: m, HTTP: httpx.Client(60 * time.Second)}
+	return &ProvisioningSession{ADI: a, Machine: m, HTTP: httpx.ClientNoKeepAlive(60 * time.Second)}
 }
 
 func (p *ProvisioningSession) headers(req *http.Request) {
 	req.Header.Set("User-Agent", "akd/1.0 CFNetwork/1404.0.5 Darwin/22.3.0")
 	// they are somehow not using the plist content-type in AuthKit
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Connection", "close")
 	req.Header.Set("X-Mme-Device-Id", p.Machine.UUID)
 	req.Header.Set("X-MMe-Client-Info", p.Machine.ClientInfo)
 	req.Header.Set("X-Apple-I-MD-LU", p.Machine.LocalUUID)

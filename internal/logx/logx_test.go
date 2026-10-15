@@ -14,7 +14,7 @@ func TestRedactBody(t *testing.T) {
 		`<key>M1</key>
 	<data>AAEC</data>`: {"AAEC"},
 		`{"accountName":"me@example.com","m1":"abc","securityCode":{"code":"123456"},"password":"p"}`: {`"abc"`, `"123456"`, `"p"`},
-		`password=hunter2&u=me`:          {"hunter2"},
+		`password=hunter2&u=me`:             {"hunter2"},
 		`Authorization: Basic dXNlcjpwYXNz`: {"dXNlcjpwYXNz"},
 	}
 	for in, secrets := range cases {

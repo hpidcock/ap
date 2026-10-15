@@ -46,19 +46,31 @@ func Insecure() bool {
 
 // Transport returns a fresh transport honouring Insecure, wrapped so that every
 // exchange is logged through logx when debugging is on.
-func Transport() http.RoundTripper {
+func Transport() http.RoundTripper { return &loggingTransport{next: baseTransport()} }
+
+func baseTransport() *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.Proxy = http.ProxyFromEnvironment
 	t.TLSClientConfig = &tls.Config{RootCAs: RootPool(), MinVersion: tls.VersionTLS12}
 	if Insecure() {
 		t.TLSClientConfig.InsecureSkipVerify = true //nolint:gosec // opt-in debugging aid
 	}
-	return &loggingTransport{next: t}
+	return t
 }
 
 // Client returns a client with the given timeout.
 func Client(timeout time.Duration) *http.Client {
 	return &http.Client{Transport: Transport(), Timeout: timeout}
+}
+
+// ClientNoKeepAlive returns a client that opens a fresh connection for every request
+// and tells the server so. gsa.apple.com's edge answers the second request on a reused
+// keep-alive connection with HTTP 503 (seen by AltStore, SideStore and iloader since
+// September 2026), and a sign-in is always several requests in a row.
+func ClientNoKeepAlive(timeout time.Duration) *http.Client {
+	t := baseTransport()
+	t.DisableKeepAlives = true
+	return &http.Client{Transport: &loggingTransport{next: t}, Timeout: timeout}
 }
 
 // ClientWithJar returns a client that keeps cookies.
