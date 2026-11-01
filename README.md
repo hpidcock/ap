@@ -118,10 +118,18 @@ your keychain.
 ## Browse your passwords
 
 ```
-ap show              # full-screen browser: type to filter, Enter reveals, Esc clears/quits
+ap show              # full-screen browser: type to filter, Enter copies, Esc clears/quits
 ap show github       # plain-text search
 ap show --plain -s   # plain text with passwords revealed
 ```
+
+In the browser, **Enter** copies the selected password to the clipboard, **Ctrl-U** the
+username and **Ctrl-T** the current verification code; **Tab** reveals the password on screen
+instead. Copied secrets are wiped from the clipboard after 45 seconds (also after you quit),
+unless you have copied something else over them. `ap` uses `wl-copy` on Wayland and `xclip` or
+`xsel` on X11; without those, or over SSH, it asks the terminal itself with the OSC 52 escape
+sequence, which most terminals support (tmux needs `set -g set-clipboard on`). The header says
+which is in use. Clipboard managers keep their own history, which `ap` cannot clear.
 
 Verification codes set up in the Passwords app are shown next to the login with a live countdown.
 

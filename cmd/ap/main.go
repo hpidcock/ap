@@ -13,9 +13,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hpidcock/ap/internal/anisette"
 	"github.com/hpidcock/ap/internal/anisette/local"
@@ -138,6 +140,8 @@ func run(args []string) int {
 		rc, err = cmdLogout(cmdArgs)
 	case "install-host":
 		rc, err = cmdInstallHost(cmdArgs)
+	case "__clip-clear": // internal: spawned by the show TUI, see clipclear.go
+		rc, err = cmdClipClear(cmdArgs)
 	case "help", "-h", "--help":
 		usage()
 		return 0
@@ -747,16 +751,28 @@ func ensureWebSession(s *session.Session, interactive bool) (*webauth.Session, m
 	return sess, account, nil
 }
 
-func totpSuffix(c vault.Credential) string {
+// totpCell is the current verification code with its countdown, or "" without one. width
+// is the widest the cell gets over the code's period, so a column sized by it stays put
+// while the countdown runs.
+func totpCell(c vault.Credential) (cell string, width int) {
 	code := totp.Generate(c.TOTP)
 	if code == nil {
-		return ""
+		return "", 0
 	}
 	left := code.Expires - time.Now().Unix()
 	if left < 0 {
 		left = 0
 	}
-	return fmt.Sprintf("  %s (%ds)", code.Code, left)
+	cell = fmt.Sprintf("%s (%ds)", code.Code, left)
+	width = utf8.RuneCountInString(cell) - len(strconv.FormatInt(left, 10)) + len(strconv.Itoa(max(code.Period, 1)))
+	return cell, width
+}
+
+func totpSuffix(c vault.Credential) string {
+	if cell, _ := totpCell(c); cell != "" {
+		return "  " + cell
+	}
+	return ""
 }
 
 func cmdShow(args []string) (int, error) {
